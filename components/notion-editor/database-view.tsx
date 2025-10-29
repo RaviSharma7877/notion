@@ -1,12 +1,27 @@
 "use client"
 
 import type React from "react"
+import { useState } from "react"
 import type { DatabaseBlock, DatabaseViewType } from "@/lib/notion-types"
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
 import { Button } from "../ui/button"
 import { Badge } from "../ui/badge"
+import { Input } from "../ui/input"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "../ui/dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table"
-import { TableIcon, BarChart3, Grid3X3, ListIcon, Calendar, Clock, Plus, MoreHorizontal } from "lucide-react"
+import {
+  TableIcon,
+  BarChart3,
+  Grid3X3,
+  ListIcon,
+  Calendar,
+  Clock,
+  Plus,
+  MoreHorizontal,
+  Trash2,
+  AlertCircle,
+} from "lucide-react"
+import { ErrorBoundary } from "../error-boundary"
 
 interface DatabaseViewProps {
   block: DatabaseBlock
@@ -26,34 +41,126 @@ const viewIcons: Record<DatabaseViewType, React.ReactNode> = {
 export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) => {
   const properties = block.properties || []
   const records = block.records || []
+  const [isAddingRecord, setIsAddingRecord] = useState(false)
+  const [newRecord, setNewRecord] = useState<Record<string, any>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  const handleAddRecord = () => {
+    try {
+      setError(null)
+
+      if (properties.length === 0) {
+        setError("Please add properties first")
+        return
+      }
+
+      const recordData: Record<string, any> = {}
+      properties.forEach((prop) => {
+        recordData[prop.id] = ""
+      })
+
+      const updatedRecords = [
+        ...records,
+        {
+          id: `record-${Date.now()}`,
+          properties: recordData,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ]
+
+      onUpdate({ records: updatedRecords })
+      setIsAddingRecord(false)
+      setNewRecord({})
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to add record"
+      setError(errorMessage)
+      console.error("[v0] Error adding record:", err)
+    }
+  }
+
+  const handleDeleteRecord = (recordId: string) => {
+    try {
+      setError(null)
+      const updatedRecords = records.filter((r) => r.id !== recordId)
+      onUpdate({ records: updatedRecords })
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to delete record"
+      setError(errorMessage)
+      console.error("[v0] Error deleting record:", err)
+    }
+  }
 
   const renderTableView = () => (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold">Table View</h3>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline">
-            <Plus className="h-4 w-4 mr-2" />
-            Add Record
-          </Button>
+          <Dialog open={isAddingRecord} onOpenChange={setIsAddingRecord}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="outline">
+                <Plus className="h-4 w-4 mr-2" />
+                Add Record
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add New Record</DialogTitle>
+              </DialogHeader>
+              {error && (
+                <div className="flex items-center gap-2 p-3 bg-destructive/10 text-destructive rounded">
+                  <AlertCircle className="h-4 w-4" />
+                  <span className="text-sm">{error}</span>
+                </div>
+              )}
+              <div className="space-y-4">
+                {properties.map((property) => (
+                  <div key={property.id}>
+                    <label className="text-sm font-medium">{property.name}</label>
+                    <Input
+                      placeholder={`Enter ${property.name}`}
+                      value={newRecord[property.id] || ""}
+                      onChange={(e) => setNewRecord({ ...newRecord, [property.id]: e.target.value })}
+                    />
+                  </div>
+                ))}
+                <Button onClick={handleAddRecord} className="w-full">
+                  Add Record
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
           <Button size="sm" variant="ghost">
             <MoreHorizontal className="h-4 w-4" />
           </Button>
         </div>
       </div>
 
+      {error && (
+        <div className="flex items-center gap-2 p-3 bg-destructive/10 text-destructive rounded">
+          <AlertCircle className="h-4 w-4" />
+          <span className="text-sm">{error}</span>
+        </div>
+      )}
+
       <div className="border rounded-md overflow-auto">
         <Table className="min-w-full">
           <TableHeader>
             <TableRow className="border-b border-[rgba(55,53,47,0.09)]">
-              {properties.map((property) => (
-                <TableHead
-                  key={property.id}
-                  className="bg-[#F1F1EF] text-[12px] uppercase tracking-wide font-medium text-foreground/80 sticky top-0"
-                >
-                  {property.name}
+              {properties.length > 0 ? (
+                properties.map((property) => (
+                  <TableHead
+                    key={property.id}
+                    className="bg-[#F1F1EF] text-[12px] uppercase tracking-wide font-medium text-foreground/80 sticky top-0"
+                  >
+                    {property.name}
+                  </TableHead>
+                ))
+              ) : (
+                <TableHead className="bg-[#F1F1EF] text-[12px] uppercase tracking-wide font-medium text-foreground/80">
+                  No properties
                 </TableHead>
-              ))}
+              )}
               <TableHead className="w-12 bg-[#F1F1EF]"></TableHead>
             </TableRow>
           </TableHeader>
@@ -76,8 +183,8 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
                     </TableCell>
                   ))}
                   <TableCell className="border-b border-[rgba(55,53,47,0.09)]">
-                    <Button size="sm" variant="ghost">
-                      <MoreHorizontal className="h-4 w-4" />
+                    <Button size="sm" variant="ghost" onClick={() => handleDeleteRecord(record.id)}>
+                      <Trash2 className="h-4 w-4" />
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -248,14 +355,16 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          {viewIcons[block.viewType]}
-          <CardTitle className="text-lg">Database</CardTitle>
-        </div>
-      </CardHeader>
-      <CardContent>{renderView()}</CardContent>
-    </Card>
+    <ErrorBoundary>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            {viewIcons[block.viewType]}
+            <CardTitle className="text-lg">Database</CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>{renderView()}</CardContent>
+      </Card>
+    </ErrorBoundary>
   )
 }
