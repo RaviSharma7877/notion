@@ -947,6 +947,10 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
           <DragDropContext
             onDragStart={() => {
               isDraggingRef.current = true
+              const activeElement = document.activeElement as HTMLElement
+              if (activeElement && activeElement !== document.body) {
+                activeElement.blur()
+              }
             }}
             onDragEnd={(result) => {
               isDraggingRef.current = false
@@ -991,13 +995,19 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
                           {...provided.draggableProps}
                           style={provided.draggableProps.style}
                           className={`group relative notion-block ${snapshot.isDragging ? "opacity-50" : ""}`}
+                          onMouseDown={(e) => {
+                            // Don't prevent default here - let drag handle work
+                            if (!e.target.closest('[role="button"],input,textarea,.drag-handle')) {
+                              e.stopPropagation()
+                            }
+                          }}
                         >
                           <div className="flex items-center gap-1">
                             <div
                               {...provided.dragHandleProps}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing p-1 rounded text-muted-foreground/80 hover:bg-muted h-6 w-6 flex items-center justify-center"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing p-1 rounded text-muted-foreground/80 hover:bg-muted h-6 w-6 flex items-center justify-center drag-handle"
                               onMouseDown={(e) => {
-                                e.stopPropagation()
+                                // This lets the drag library handle the drag initiation
                               }}
                               aria-label="Drag block"
                             >
@@ -1029,7 +1039,6 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
                               setShowCommandPalette(true)
                             }}
                           />
-                          {/* Removed extra spacer/hint to match Notion look */}
                         </div>
                       )}
                     </Draggable>

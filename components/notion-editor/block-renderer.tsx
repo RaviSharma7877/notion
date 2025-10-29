@@ -198,6 +198,12 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               onSelect()
               setIsEditing(true)
             }}
+            onMouseDown={(e) => {
+              // Don't stop propagation if clicking on drag handle
+              if (!e.target.closest(".drag-handle")) {
+                e.stopPropagation()
+              }
+            }}
           >
             {isEditing ? (
               <Textarea
