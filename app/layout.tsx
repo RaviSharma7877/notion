@@ -1,6 +1,14 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Inter, Poppins, Merriweather, Fira_Code } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/lib/providers/next-theme-provider";
+import { AuthProvider } from "@/lib/providers/auth-provider";
+import { SocketProvider } from "@/lib/providers/socket-provider";
+
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
+const poppins = Poppins({ subsets: ['latin'], weight: ['300','400','600'], variable: '--font-poppins' })
+const merri = Merriweather({ subsets: ['latin'], weight: ['300','400','700'], variable: '--font-merri' })
+const firaCode = Fira_Code({ subsets: ['latin'], variable: '--font-fira-code' })
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,11 +31,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        suppressHydrationWarning
+        className={`${geistSans.variable} ${geistMono.variable} ${inter.variable} ${poppins.variable} ${merri.variable} ${firaCode.variable} antialiased`}
       >
-        {children}
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="dark"
+          enableSystem
+        >
+          <AuthProvider>
+            <SocketProvider>{children}</SocketProvider>
+          </AuthProvider>
+        </ThemeProvider>
       </body>
     </html>
   );
