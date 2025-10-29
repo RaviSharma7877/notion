@@ -359,7 +359,22 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
     setEditorState((prev): NotionEditorState => {
       const newBlocks = [...prev.blocks]
       const currentIndex = newBlocks.findIndex((block) => block.id === blockId)
-      if (currentIndex === -1) return prev as NotionEditorState
+
+      if (currentIndex === -1 || newIndex < 0 || newIndex > newBlocks.length) {
+        return prev as NotionEditorState
+      }
+
+      const blockToMove = newBlocks[currentIndex]
+      const isEmpty =
+        !blockToMove.content || (typeof blockToMove.content === "string" && blockToMove.content.trim() === "")
+      if (isEmpty && currentIndex === newIndex) {
+        return prev as NotionEditorState
+      }
+
+      if (blockToMove.type === "paragraph" && isEmpty) {
+        console.log("[v0] Skipping move of empty paragraph block")
+        return prev as NotionEditorState
+      }
 
       const [movedBlock] = newBlocks.splice(currentIndex, 1)
       newBlocks.splice(newIndex, 0, movedBlock)
@@ -919,7 +934,16 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
             }}
             onDragEnd={(result) => {
               isDraggingRef.current = false
-              if (!result.destination) return
+              if (!result.destination) {
+                console.log("[v0] Drag cancelled - no valid destination")
+                return
+              }
+
+              if (result.destination.index < 0 || result.destination.index > editorState.blocks.length) {
+                console.log("[v0] Drag cancelled - invalid destination index")
+                return
+              }
+
               moveBlock(result.draggableId, result.destination.index)
               setEditorState((prev) => ({
                 ...prev,
