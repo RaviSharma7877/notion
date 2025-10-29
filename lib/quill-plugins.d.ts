@@ -13,4 +13,3 @@ declare module 'quill-image-drop-module' {
     const BetterTable: any;
     export default BetterTable;
   }
-  
