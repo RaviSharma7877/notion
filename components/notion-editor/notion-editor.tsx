@@ -378,11 +378,20 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
 
       const [movedBlock] = newBlocks.splice(currentIndex, 1)
       newBlocks.splice(newIndex, 0, movedBlock)
-      return {
+
+      const updatedState = {
         ...prev,
         blocks: newBlocks as Block[],
         lastModified: new Date().toISOString(),
       }
+
+      // Queue the update to persist the new block order
+      pendingUpdateRef.current = {
+        ...pendingUpdateRef.current,
+        data: JSON.stringify(newBlocks),
+      }
+
+      return updatedState
     })
   }, [])
 
@@ -644,14 +653,21 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
 
   // Load blocks from data
   useEffect(() => {
-    if (details.data) {
+    if (details.data && !isDraggingRef.current) {
       try {
         const parsedBlocks = JSON.parse(details.data) as Block[]
         if (Array.isArray(parsedBlocks)) {
-          setEditorState((prev) => ({
-            ...prev,
-            blocks: parsedBlocks as Block[],
-          }))
+          setEditorState((prev) => {
+            // Only update if blocks have actually changed
+            const blocksChanged = JSON.stringify(prev.blocks) !== JSON.stringify(parsedBlocks)
+            if (blocksChanged) {
+              return {
+                ...prev,
+                blocks: parsedBlocks as Block[],
+              }
+            }
+            return prev
+          })
         }
       } catch (error) {
         console.error("Failed to parse blocks data", error)
