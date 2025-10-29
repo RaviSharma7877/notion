@@ -42,17 +42,14 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
   const properties = block.properties || []
   const records = block.records || []
   const [isAddingRecord, setIsAddingRecord] = useState(false)
+  const [isAddingProperty, setIsAddingProperty] = useState(false)
   const [newRecord, setNewRecord] = useState<Record<string, any>>({})
+  const [newProperty, setNewProperty] = useState({ name: "", type: "text" })
   const [error, setError] = useState<string | null>(null)
 
   const handleAddRecord = () => {
     try {
       setError(null)
-
-      if (properties.length === 0) {
-        setError("Please add properties first")
-        return
-      }
 
       const recordData: Record<string, any> = {}
       properties.forEach((prop) => {
@@ -79,6 +76,32 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
     }
   }
 
+  const handleAddProperty = () => {
+    try {
+      setError(null)
+
+      if (!newProperty.name.trim()) {
+        setError("Property name cannot be empty")
+        return
+      }
+
+      const newProp = {
+        id: `prop-${Date.now()}`,
+        name: newProperty.name,
+        type: newProperty.type,
+      }
+
+      const updatedProperties = [...properties, newProp]
+      onUpdate({ properties: updatedProperties })
+      setIsAddingProperty(false)
+      setNewProperty({ name: "", type: "text" })
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to add property"
+      setError(errorMessage)
+      console.error("[v0] Error adding property:", err)
+    }
+  }
+
   const handleDeleteRecord = (recordId: string) => {
     try {
       setError(null)
@@ -91,11 +114,72 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
     }
   }
 
+  const handleDeleteProperty = (propertyId: string) => {
+    try {
+      setError(null)
+      const updatedProperties = properties.filter((p) => p.id !== propertyId)
+      onUpdate({ properties: updatedProperties })
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to delete property"
+      setError(errorMessage)
+      console.error("[v0] Error deleting property:", err)
+    }
+  }
+
   const renderTableView = () => (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold">Table View</h3>
         <div className="flex items-center gap-2">
+          <Dialog open={isAddingProperty} onOpenChange={setIsAddingProperty}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="outline">
+                <Plus className="h-4 w-4 mr-2" />
+                Add Property
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add New Property</DialogTitle>
+              </DialogHeader>
+              {error && (
+                <div className="flex items-center gap-2 p-3 bg-destructive/10 text-destructive rounded">
+                  <AlertCircle className="h-4 w-4" />
+                  <span className="text-sm">{error}</span>
+                </div>
+              )}
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm font-medium">Property Name</label>
+                  <Input
+                    placeholder="e.g., Status, Priority, Due Date"
+                    value={newProperty.name}
+                    onChange={(e) => setNewProperty({ ...newProperty, name: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium">Property Type</label>
+                  <select
+                    className="w-full px-3 py-2 border border-input rounded-md bg-background text-foreground"
+                    value={newProperty.type}
+                    onChange={(e) => setNewProperty({ ...newProperty, type: e.target.value })}
+                  >
+                    <option value="text">Text</option>
+                    <option value="number">Number</option>
+                    <option value="checkbox">Checkbox</option>
+                    <option value="select">Select</option>
+                    <option value="multi_select">Multi-select</option>
+                    <option value="date">Date</option>
+                    <option value="url">URL</option>
+                  </select>
+                </div>
+                <Button onClick={handleAddProperty} className="w-full">
+                  Add Property
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+
           <Dialog open={isAddingRecord} onOpenChange={setIsAddingRecord}>
             <DialogTrigger asChild>
               <Button size="sm" variant="outline">
@@ -114,22 +198,29 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
                 </div>
               )}
               <div className="space-y-4">
-                {properties.map((property) => (
-                  <div key={property.id}>
-                    <label className="text-sm font-medium">{property.name}</label>
-                    <Input
-                      placeholder={`Enter ${property.name}`}
-                      value={newRecord[property.id] || ""}
-                      onChange={(e) => setNewRecord({ ...newRecord, [property.id]: e.target.value })}
-                    />
+                {properties.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">
+                    No properties yet. Add a property first to create records.
                   </div>
-                ))}
-                <Button onClick={handleAddRecord} className="w-full">
+                ) : (
+                  properties.map((property) => (
+                    <div key={property.id}>
+                      <label className="text-sm font-medium">{property.name}</label>
+                      <Input
+                        placeholder={`Enter ${property.name}`}
+                        value={newRecord[property.id] || ""}
+                        onChange={(e) => setNewRecord({ ...newRecord, [property.id]: e.target.value })}
+                      />
+                    </div>
+                  ))
+                )}
+                <Button onClick={handleAddRecord} className="w-full" disabled={properties.length === 0}>
                   Add Record
                 </Button>
               </div>
             </DialogContent>
           </Dialog>
+
           <Button size="sm" variant="ghost">
             <MoreHorizontal className="h-4 w-4" />
           </Button>
@@ -151,9 +242,18 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({ block, onUpdate }) =
                 properties.map((property) => (
                   <TableHead
                     key={property.id}
-                    className="bg-[#F1F1EF] text-[12px] uppercase tracking-wide font-medium text-foreground/80 sticky top-0"
+                    className="bg-[#F1F1EF] text-[12px] uppercase tracking-wide font-medium text-foreground/80 sticky top-0 relative group"
                   >
-                    {property.name}
+                    <div className="flex items-center justify-between gap-2">
+                      <span>{property.name}</span>
+                      <button
+                        onClick={() => handleDeleteProperty(property.id)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 rounded"
+                        title="Delete property"
+                      >
+                        <Trash2 className="h-3 w-3 text-destructive" />
+                      </button>
+                    </div>
                   </TableHead>
                 ))
               ) : (
