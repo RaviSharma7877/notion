@@ -3,7 +3,9 @@ import { Geist, Geist_Mono, Inter, Poppins, Merriweather, Fira_Code } from "next
 import "./globals.css";
 import { ThemeProvider } from "@/lib/providers/next-theme-provider";
 import { AuthProvider } from "@/lib/providers/auth-provider";
-import { SocketProvider } from "@/lib/providers/socket-provider";
+// import { CollaborationProvider } from "@/lib/providers/collaboration-provider";
+import { NotificationProvider } from "@/components/notifications/notification-provider";
+import { NotificationToaster } from "@/components/notifications/notification-toaster";
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 const poppins = Poppins({ subsets: ['latin'], weight: ['300','400','600'], variable: '--font-poppins' })
@@ -43,7 +45,11 @@ export default function RootLayout({
           enableSystem
         >
           <AuthProvider>
-            <SocketProvider>{children}</SocketProvider>
+            <NotificationProvider>
+              {/* CollaborationProvider temporarily disabled */}
+              {children}
+              <NotificationToaster />
+            </NotificationProvider>
           </AuthProvider>
         </ThemeProvider>
       </body>

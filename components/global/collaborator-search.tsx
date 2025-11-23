@@ -30,7 +30,7 @@ const CollaboratorSearch: React.FC<CollaboratorSearchProps> = ({
 }) => {
   const { user } = useAuth();
   const [searchResults, setSearchResults] = useState<UserDto[]>([]);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
@@ -68,11 +68,8 @@ const CollaboratorSearch: React.FC<CollaboratorSearchProps> = ({
       <SheetContent className="w-[400px] sm:w-[540px]">
         <SheetHeader>
           <SheetTitle>Search Collaborator</SheetTitle>
-          <SheetDescription>
-            <p className="text-sm text-muted-foreground">
-              You can also remove collaborators after adding them from the
-              settings tab.
-            </p>
+          <SheetDescription className="text-sm text-muted-foreground">
+            You can also remove collaborators after adding them from the settings tab.
           </SheetDescription>
         </SheetHeader>
         <div

@@ -38,7 +38,7 @@ const Dropdown: React.FC<DropdownProps> = ({ title, id, listType, iconId }) => {
   const router = useRouter()
   const { toast } = useToast()
   const { user } = useAuth()
-  const { state, dispatch, workspaceId } = useAppState()
+  const { state, dispatch, workspaceId, folderId: activeFolderId, fileId: activeFileId } = useAppState()
 
   const [isEditing, setIsEditing] = useState(false)
   const [draftTitle, setDraftTitle] = useState<string>("")
@@ -255,6 +255,9 @@ const Dropdown: React.FC<DropdownProps> = ({ title, id, listType, iconId }) => {
         await updateFolder(id, { inTrash: true, workspaceId, title: ensuredTitle })
         toast({ title: "Success", description: "Moved folder to trash." })
         setFiles([])
+        if (workspaceId && activeFolderId === id) {
+          router.replace(`/dashboard/${workspaceId}`)
+        }
       } catch {
         toast({ title: "Error", variant: "destructive", description: "Could not move the folder to trash" })
       }
@@ -270,6 +273,9 @@ const Dropdown: React.FC<DropdownProps> = ({ title, id, listType, iconId }) => {
         await updateFile(fileId, { inTrash: true, workspaceId, folderId: fileFolderId, title: ensuredTitle })
         toast({ title: "Success", description: "Moved file to trash." })
         setFiles((prev) => prev.filter((f) => f.id !== fileId))
+        if (workspaceId && activeFileId === fileId) {
+          router.replace(`/dashboard/${workspaceId}`)
+        }
       } catch {
         toast({ title: "Error", variant: "destructive", description: "Could not move the file to trash" })
       }
@@ -289,9 +295,19 @@ const Dropdown: React.FC<DropdownProps> = ({ title, id, listType, iconId }) => {
       folderId: id,
     }
     try {
-      const createdFile: FileDto = await createFile(payload)
-      setFiles((prev) => [{ ...createdFile, createdAt: (createdFile as any).createdAt ?? new Date().toISOString() } as any, ...prev])
-      dispatch({ type: "ADD_FILE", payload: { workspaceId, folderId: id, file: { ...createdFile } as any } })
+      const createdFile: FileDto | null | undefined = await createFile(payload)
+      if (!createdFile) {
+        toast({ title: "Error", variant: "destructive", description: "File was not created. Please try again." })
+        return
+      }
+      const fallbackTimestamp = new Date().toISOString()
+      const safeFile = {
+        ...createdFile,
+        createdAt: (createdFile as any)?.createdAt ?? fallbackTimestamp,
+        updatedAt: (createdFile as any)?.updatedAt ?? fallbackTimestamp,
+      } as FileDto
+      setFiles((prev) => [safeFile as any, ...prev])
+      dispatch({ type: "ADD_FILE", payload: { workspaceId, folderId: id, file: safeFile as any } })
       toast({ title: "Success", description: "File created." })
     } catch {
       toast({ title: "Error", variant: "destructive", description: "Could not create a file" })

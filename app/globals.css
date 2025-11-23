@@ -145,6 +145,15 @@
   }
 }
 
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(120%);
+  }
+}
+
 .ce-popover-item:hover {
   background-color: hsl(var(--muted) / 0.4) !important;
   transition-property: all;

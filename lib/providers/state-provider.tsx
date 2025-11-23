@@ -331,7 +331,7 @@ const AppStateProvider: React.FC<AppStateProviderProps> = ({ children }) => {
     if (!folderId || !workspaceId) return;
     const fetchFiles = async () => {
       try {
-        const response = await listFiles({ folderId, size: 100 });
+        const response = await listFiles({ folderId, workspaceId, size: 100 });
         const files = response.content ?? [];
         dispatch({
           type: 'SET_FILES',

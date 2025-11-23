@@ -20,6 +20,7 @@ import CollaboratorSearch from './collaborator-search';
 import { ScrollArea } from '../ui/scroll-area';
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar';
 import { useToast } from '../ui/use-toast';
+import { resolveWorkspaceOwnerId } from '@/lib/auth/user';
 
 const WorkspaceCreator = () => {
   const { user } = useAuth();
@@ -43,7 +44,8 @@ const WorkspaceCreator = () => {
 
   const createItem = async () => {
     setIsLoading(true);
-    if (!user?.id) {
+    const workspaceOwnerId = resolveWorkspaceOwnerId(user);
+    if (!workspaceOwnerId) {
       toast({
         title: 'Unable to create workspace',
         description: 'You must be signed in to create a workspace.',
@@ -59,7 +61,7 @@ const WorkspaceCreator = () => {
         iconId: '💼',
         data: null,
         inTrash: false,
-        workspaceOwner: user.id,
+        workspaceOwner: workspaceOwnerId,
         logo: null,
         bannerUrl: null,
       };
@@ -68,14 +70,24 @@ const WorkspaceCreator = () => {
 
       if (permissions === 'shared' && collaborators.length > 0) {
         await Promise.all(
-          collaborators.map((collaborator) =>
-            createCollaborator({
+          collaborators.map((collaborator) => {
+            const collaboratorIdentifier =
+              resolveWorkspaceOwnerId(collaborator) ??
+              (typeof collaborator.id === 'string' ? collaborator.id : undefined);
+
+            if (!collaboratorIdentifier) {
+              console.warn('Skipping collaborator with no identifier', collaborator);
+              return Promise.resolve(null);
+            }
+
+            return createCollaborator({
               workspaceId: createdWorkspace.id,
-              userId: collaborator.id,
+              userId: collaboratorIdentifier,
             }).catch((error) => {
               console.error('Failed to add collaborator', error);
-            })
-          )
+              return null;
+            });
+          })
         );
       }
 

@@ -28,6 +28,7 @@ import {
   type CollaboratorDto,
   type UserDto,
 } from '@/lib/queries';
+import { resolveWorkspaceOwnerId } from '@/lib/auth/user';
 import {
   Select,
   SelectContent,
@@ -68,10 +69,22 @@ const SettingsForm = () => {
   const [collaborators, setCollaborators] = useState<UserDto[]>([]);
   const [openAlertMessage, setOpenAlertMessage] = useState(false);
   const [workspaceDetails, setWorkspaceDetails] = useState<appWorkspacesType | undefined>();
-  const titleTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const titleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [loadingPortal, setLoadingPortal] = useState(false);
   const collaboratorMapRef = useRef<Map<string, string>>(new Map());
+
+  const resolveCollaboratorKey = (candidate: UserDto): string | undefined => {
+    const secretId = resolveWorkspaceOwnerId(candidate);
+    if (secretId && secretId.length > 0) {
+      return secretId;
+    }
+    const identifier = candidate.id;
+    if (typeof identifier === 'string' && identifier.length > 0) {
+      return identifier;
+    }
+    return undefined;
+  };
 
   //WIP PAYMENT PORTAL
 
@@ -95,7 +108,20 @@ const SettingsForm = () => {
       setOpen(true);
       return;
     }
-    if (collaborators.some((collaborator) => collaborator.id === profile.id)) {
+    const collaboratorKey = resolveCollaboratorKey(profile);
+    if (!collaboratorKey) {
+      toast({
+        title: 'Unable to add collaborator',
+        description: 'We could not determine a valid collaborator identifier.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (
+      collaborators.some(
+        (collaborator) => resolveCollaboratorKey(collaborator) === collaboratorKey
+      )
+    ) {
       toast({
         title: 'Already a collaborator',
         description: 'This user is already part of the workspace.',
@@ -105,9 +131,9 @@ const SettingsForm = () => {
     try {
       const created = await createCollaborator({
         workspaceId,
-        userId: profile.id,
+        userId: collaboratorKey,
       });
-      collaboratorMapRef.current.set(profile.id, created.id);
+      collaboratorMapRef.current.set(collaboratorKey, created.id);
       setCollaborators((prev) => [...prev, profile]);
     } catch (error) {
       console.error('Failed to add collaborator', error);
@@ -122,7 +148,11 @@ const SettingsForm = () => {
   //remove collaborators
   const removeCollaborator = async (collaboratorUser: UserDto) => {
     if (!workspaceId) return;
-    const collaboratorId = collaboratorMapRef.current.get(collaboratorUser.id);
+    const collaboratorKey = resolveCollaboratorKey(collaboratorUser);
+    if (!collaboratorKey) {
+      return;
+    }
+    const collaboratorId = collaboratorMapRef.current.get(collaboratorKey);
 
     if (!collaboratorId) {
       return;
@@ -130,9 +160,11 @@ const SettingsForm = () => {
 
     try {
       await deleteCollaborator(collaboratorId);
-      collaboratorMapRef.current.delete(collaboratorUser.id);
+      collaboratorMapRef.current.delete(collaboratorKey);
       setCollaborators((prev) => {
-        const next = prev.filter((collaborator) => collaborator.id !== collaboratorUser.id);
+        const next = prev.filter(
+          (collaborator) => resolveCollaboratorKey(collaborator) !== collaboratorKey
+        );
         if (!next.length) {
           setPermissions('private');
         }
@@ -201,7 +233,9 @@ const SettingsForm = () => {
     if (collaborators.length > 0) {
       await Promise.all(
         collaborators.map(async (collaborator) => {
-          const collaboratorId = collaboratorMapRef.current.get(collaborator.id);
+          const collaboratorKey = resolveCollaboratorKey(collaborator);
+          if (!collaboratorKey) return;
+          const collaboratorId = collaboratorMapRef.current.get(collaboratorKey);
           if (!collaboratorId) return;
           try {
             await deleteCollaborator(collaboratorId);
@@ -252,7 +286,10 @@ const SettingsForm = () => {
           entries.map(async (entry) => {
             try {
               const collaboratorUser = await getUser(entry.userId);
-              collaboratorMapRef.current.set(entry.userId, entry.id);
+              const collaboratorKey = resolveCollaboratorKey(collaboratorUser) ?? entry.userId;
+              if (collaboratorKey) {
+                collaboratorMapRef.current.set(collaboratorKey, entry.id);
+              }
               return collaboratorUser;
             } catch (error) {
               console.error('Failed to fetch collaborator user', error);

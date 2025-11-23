@@ -94,6 +94,12 @@ export interface CodeBlock extends BaseBlock {
   type: 'code';
   content: string;
   language: string;
+  previewEnabled?: boolean;
+  sources?: {
+    html: string;
+    css: string;
+    javascript: string;
+  };
 }
 
 export interface CalloutBlock extends BaseBlock {
@@ -201,7 +207,7 @@ export interface EmbedBlock extends BaseBlock {
   type: 'embed';
   content: '';
   url: string;
-  provider: 'codepen' | 'figma' | 'google_drive' | 'google_maps' | 'twitter' | 'github' | 'other';
+  provider: 'codepen' | 'figma' | 'google_drive' | 'google_maps' | 'google_calendar' | 'twitter' | 'github' | 'other';
   title?: string;
 }
 

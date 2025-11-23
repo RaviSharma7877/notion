@@ -14,9 +14,11 @@ import React, {
   useState,
 } from 'react';
 import type Quill from 'quill';
-import type { DeltaStatic, RangeStatic, Sources } from 'quill';
 import 'quill/dist/quill.snow.css';
 import { Button } from '../ui/button';
+// import { CollaborationIndicator } from '@/components/collaboration/collaboration-indicator';
+// import { CollaborationPanel } from '@/components/collaboration/collaboration-panel';
+// import { PresencePanel } from '@/components/collaboration/presence-panel';
 import {
   createCollaborator,
   deleteFile,
@@ -32,6 +34,7 @@ import {
   updateFolder,
   updateWorkspace,
 } from '@/lib/queries';
+import { resolveWorkspaceOwnerId } from '@/lib/auth/user';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   Tooltip,
@@ -45,7 +48,7 @@ import Image from 'next/image';
 import EmojiPicker from '../global/emoji-picker';
 import BannerUpload from '../banner-upload/banner-upload';
 import { Loader2, Share2, XCircleIcon } from 'lucide-react';
-import { useSocket } from '@/lib/providers/socket-provider';
+// import { useSocket } from '@/lib/providers/socket-provider';
 import { useAuth } from '@/lib/providers/auth-provider';
 import { Input } from '../ui/input';
 import CollaboratorSearch from '../global/collaborator-search';
@@ -61,11 +64,11 @@ function colorFromId(id: string): string {
   return `hsl(${hue}, 70%, 55%)`;
 }
 
-type QuillCursorsModule = {
-  createCursor: (id: string, name: string, color: string) => void;
-  moveCursor: (id: string, range: RangeStatic | null) => void;
-  removeCursor: (id: string) => void;
-};
+// type QuillCursorsModule = {
+//   createCursor: (id: string, name: string, color: string) => void;
+//   moveCursor: (id: string, range: any | null) => void;
+//   removeCursor: (id: string) => void;
+// };
 
 export interface QuillEditorHandle {
   flushPending: () => Promise<void>;
@@ -99,10 +102,10 @@ const TOOLBAR_OPTIONS = [
 const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
   ({ dirDetails, dirType, fileId }, ref) => {
   const { state, workspaceId, folderId, dispatch } = useAppState();
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const { user } = useAuth();
   const router = useRouter();
-  const { socket } = useSocket();
+  // const { socket } = useSocket();
   const pathname = usePathname();
   const [quill, setQuill] = useState<Quill | null>(null);
   const [isEditorEmpty, setIsEditorEmpty] = useState(true);
@@ -111,25 +114,25 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
   const [deletingBanner, setDeletingBanner] = useState(false);
   const [saving, setSaving] = useState(false);
   const [hasPending, setHasPending] = useState(false);
+  // const [showPresencePanel, setShowPresencePanel] = useState(false);
   const pendingUpdateRef = useRef<Partial<WorkspaceDto & FolderDto & FileDto>>({});
-  const pendingContentRef = useRef(0);
-  const documentVersionRef = useRef(0);
-  const joinPayloadRef = useRef<{
-    documentId: string;
-    userId: string;
-    displayName: string;
-    color: string;
-  } | null>(null);
-  const presenceColorsRef = useRef<Map<string, string>>(new Map());
-  const cursorsRef = useRef<QuillCursorsModule | null>(null);
+  // const pendingContentRef = useRef(0);
+  // const documentVersionRef = useRef(0);
+  // const joinPayloadRef = useRef<{
+  //   documentId: string;
+  //   userId: string;
+  //   displayName: string;
+  //   color: string;
+  // } | null>(null);
+  // const presenceColorsRef = useRef<Map<string, string>>(new Map());
+  // const cursorsRef = useRef<QuillCursorsModule | null>(null);
   const disposedRef = useRef(false);
   const { toast } = useToast();
   const [titleInput, setTitleInput] = useState(dirDetails.title ?? '');
 
   const syncPendingIndicators = useCallback(() => {
-    const hasMetadataPending = Object.keys(pendingUpdateRef.current).length > 0;
-    const hasContentPending = pendingContentRef.current > 0;
-    if (hasMetadataPending || hasContentPending) {
+    const hasPendingChanges = Object.keys(pendingUpdateRef.current).length > 0;
+    if (hasPendingChanges) {
       setHasPending(true);
       setSaving(true);
     } else {
@@ -138,12 +141,12 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
     }
   }, []);
 
-  const ensurePresenceColor = useCallback((id: string) => {
-    if (!presenceColorsRef.current.has(id)) {
-      presenceColorsRef.current.set(id, colorFromId(id));
-    }
-    return presenceColorsRef.current.get(id)!;
-  }, []);
+  // const ensurePresenceColor = useCallback((id: string) => {
+  //   if (!presenceColorsRef.current.has(id)) {
+  //     presenceColorsRef.current.set(id, colorFromId(id));
+  //   }
+  //   return presenceColorsRef.current.get(id)!;
+  // }, []);
 
   const applyLocalUpdate = useCallback(
     (update: Partial<WorkspaceDto & FolderDto & FileDto>) => {
@@ -207,12 +210,21 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
     }
 
     return {
+      id: dirDetails.id,
       title: dirDetails.title,
       iconId: dirDetails.iconId,
       createdAt: (dirDetails as { createdAt?: string | null }).createdAt,
       data: dirDetails.data,
       inTrash: dirDetails.inTrash,
       bannerUrl: dirDetails.bannerUrl,
+      ...(dirType === 'workspace' && {
+        logo: (dirDetails as WorkspaceDto).logo,
+        workspaceOwner: (dirDetails as WorkspaceDto).workspaceOwner,
+      }),
+      ...(dirType === 'file' && {
+        workspaceId: (dirDetails as FileDto).workspaceId,
+        folderId: (dirDetails as FileDto).folderId,
+      }),
     } as WorkspaceDto | FolderDto | FileDto;
   }, [state, workspaceId, folderId, dirDetails, dirType, fileId]);
 
@@ -334,8 +346,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
   const handleAddCollaborator = useCallback(
     async (profile: UserDto) => {
       if (dirType !== 'workspace') return;
-      if (!profile.id) return;
-      if (collaboratorMapRef.current.has(profile.id)) {
+      const collaboratorKey = resolveWorkspaceOwnerId(profile) ?? profile.id;
+      if (!collaboratorKey) return;
+      if (collaboratorMapRef.current.has(collaboratorKey)) {
         toast({
           title: 'Collaborator already added',
           description: 'This user already has access to the workspace.',
@@ -345,9 +358,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
       try {
         const created = await createCollaborator({
           workspaceId: fileId,
-          userId: profile.id,
+          userId: collaboratorKey,
         });
-        collaboratorMapRef.current.set(profile.id, created.id);
+        collaboratorMapRef.current.set(collaboratorKey, created.id);
         setCollaborators((prev) => [...prev, profile]);
         toast({
           title: 'Collaborator added',
@@ -376,7 +389,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
       try {
         await deleteCollaborator(collaboratorId);
         collaboratorMapRef.current.delete(userId);
-        setCollaborators((prev) => prev.filter((collaborator) => collaborator.id !== userId));
+        setCollaborators((prev) =>
+          prev.filter((collaborator) => (resolveWorkspaceOwnerId(collaborator) ?? collaborator.id) !== userId)
+        );
         toast({
           title: 'Collaborator removed',
           description: 'Access revoked successfully.',
@@ -424,7 +439,10 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
           entries.map(async (entry) => {
             try {
               const collaborator = await getUser(entry.userId);
-              collaboratorMapRef.current.set(entry.userId, entry.id);
+              if (collaborator) {
+                const collaboratorKey = resolveWorkspaceOwnerId(collaborator) ?? entry.userId;
+                collaboratorMapRef.current.set(collaboratorKey, entry.id);
+              }
               return collaborator;
             } catch (error) {
               console.error('Failed to fetch collaborator profile', error);
@@ -458,28 +476,27 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
   }, []);
 
   //
-  const wrapperRef = useCallback(async (wrapper: HTMLDivElement | null) => {
+  const wrapperRef = useCallback((wrapper: HTMLDivElement | null) => {
     if (typeof window !== 'undefined') {
       if (wrapper === null) return;
       wrapper.innerHTML = '';
       const editor = document.createElement('div');
       wrapper.append(editor);
-      const Quill = (await import('quill')).default;
-      const QuillCursors = (await import('quill-cursors')).default;
-      Quill.register('modules/cursors', QuillCursors);
-      const q = new Quill(editor, {
-        theme: 'snow',
-        modules: {
-          toolbar: TOOLBAR_OPTIONS,
-          cursors: {
-            transformOnTextChange: true,
+      
+      // Load Quill asynchronously
+      Promise.all([
+        import('quill')
+      ]).then(([QuillModule]) => {
+        const Quill = QuillModule.default;
+        const q = new Quill(editor, {
+          theme: 'snow',
+          modules: {
+            toolbar: TOOLBAR_OPTIONS,
           },
-        },
+        });
+        setQuill(q);
+        setIsEditorEmpty(q.getLength() === 1);
       });
-      setQuill(q);
-      const cursorsModule = q.getModule('cursors') as QuillCursorsModule | null;
-      cursorsRef.current = cursorsModule;
-      setIsEditorEmpty(q.getLength() === 1);
     }
   }, []);
 
@@ -488,17 +505,17 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
       if (!folderId || !workspaceId) return;
       dispatch({
         type: 'UPDATE_FILE',
-        payload: { file: { inTrash: '' }, fileId, folderId, workspaceId },
+        payload: { file: { inTrash: false }, fileId, folderId, workspaceId },
       });
-      await updateFile(fileId, { inTrash: '' });
+      await updateFile(fileId, { inTrash: false });
     }
     if (dirType === 'folder') {
       if (!workspaceId) return;
       dispatch({
         type: 'UPDATE_FOLDER',
-        payload: { folder: { inTrash: '' }, folderId: fileId, workspaceId },
+        payload: { folder: { inTrash: false }, folderId: fileId, workspaceId },
       });
-      await updateFolder(fileId, { inTrash: '' });
+      await updateFolder(fileId, { inTrash: false });
     }
   };
 
@@ -566,6 +583,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
         if (dirType === 'file') {
           const selected = await getFile(fileId);
           if (!active) return;
+          if (!selected) {
+            throw new Error('File not found');
+          }
           if (workspaceId && quill !== null && selected.data) {
             try {
               quill.setContents(JSON.parse(selected.data));
@@ -588,6 +608,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
         } else if (dirType === 'folder') {
           const selected = await getFolder(fileId);
           if (!active) return;
+          if (!selected) {
+            throw new Error('Folder not found');
+          }
           if (quill !== null && selected.data) {
             try {
               quill.setContents(JSON.parse(selected.data));
@@ -607,6 +630,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
         } else {
           const selected = await getWorkspace(fileId);
           if (!active) return;
+           if (!selected) {
+            throw new Error('Workspace not found');
+          }
           if (quill !== null && selected.data) {
             try {
               quill.setContents(JSON.parse(selected.data));
@@ -641,192 +667,26 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
   }, [fileId, workspaceId, quill, dirType, dispatch, router]);
 
 
-  //join/leave document room
+  // Local text-change handler to save content (collaboration disabled)
   useEffect(() => {
-    if (socket === null || quill === null || !fileId || !user?.id) {
-      return;
-    }
+    if (quill === null || !fileId) return;
 
-    const payload = {
-      documentId: fileId,
-      userId: user.id,
-      displayName: user.fullName ?? user.email ?? 'Collaborator',
-      color: colorFromId(user.id),
-    };
-
-    joinPayloadRef.current = payload;
-    socket.emit('document:join', payload);
-
-    return () => {
-      socket.emit('document:leave', {
-        documentId: fileId,
-        userId: user.id,
-      });
-    };
-  }, [socket, quill, fileId, user]);
-
-  //Send editor changes via collaboration server
-  useEffect(() => {
-    if (quill === null || socket === null || !fileId || !user?.id) return;
-
-    const selectionChangeHandler =
-      (cursorId: string) =>
-      (range: RangeStatic | null, _oldRange: RangeStatic | null, source: Sources) => {
-        if (source === 'user' && cursorId) {
-          socket.emit('document:cursor', {
-            documentId: fileId,
-            userId: cursorId,
-            displayName: user.fullName ?? user.email ?? 'Collaborator',
-            color: colorFromId(cursorId),
-            range,
-          });
-        }
-      };
-
-    const quillHandler = (_delta: DeltaStatic, _oldDelta: DeltaStatic, source: Sources) => {
+    const quillHandler = (_delta: any, _oldDelta: any, source: string) => {
       if (source !== 'user') return;
       const contents = quill.getContents();
       const serializedContents =
         contents && quill.getLength() !== 1 ? JSON.stringify(contents) : null;
 
       applyLocalUpdate({ data: serializedContents });
-
-      pendingContentRef.current += 1;
-      syncPendingIndicators();
-
+      queueUpdate({ data: serializedContents as any });
       setIsEditorEmpty(quill.getLength() === 1);
-
-      socket.emit('document:update', {
-        documentId: fileId,
-        userId: user.id,
-        content: serializedContents,
-        version: documentVersionRef.current,
-      });
     };
-
-    const boundSelectionHandler = selectionChangeHandler(user.id);
 
     quill.on('text-change', quillHandler);
-    quill.on('selection-change', boundSelectionHandler);
-
     return () => {
       quill.off('text-change', quillHandler);
-      quill.off('selection-change', boundSelectionHandler);
     };
-  }, [quill, socket, fileId, user, applyLocalUpdate, syncPendingIndicators]);
-
-  useEffect(() => {
-    if (quill === null || socket === null || !fileId) return;
-
-    const handleDocumentState = (payload: {
-      documentId?: string;
-      content?: string | null;
-      version?: number;
-    }) => {
-      if (payload.documentId !== fileId) {
-        return;
-      }
-      if (payload.content) {
-        try {
-          const parsed = JSON.parse(payload.content);
-          quill.setContents(parsed);
-        } catch (error) {
-          console.error('Failed to apply document state', error);
-        }
-        applyLocalUpdate({ data: payload.content });
-      }
-      if (typeof payload.version === 'number') {
-        documentVersionRef.current = payload.version;
-      }
-      pendingContentRef.current = 0;
-      syncPendingIndicators();
-      setIsEditorEmpty(quill.getLength() === 1);
-    };
-
-    const handleDocumentPatched = (payload: {
-      documentId?: string;
-      content?: string | null;
-      version?: number;
-      userId?: string;
-    }) => {
-      if (payload.documentId !== fileId) {
-        return;
-      }
-
-      if (payload.content) {
-        try {
-          const parsed = JSON.parse(payload.content);
-          quill.setContents(parsed);
-        } catch (error) {
-          console.error('Failed to apply document patch', error);
-        }
-        applyLocalUpdate({ data: payload.content });
-      }
-
-      if (typeof payload.version === 'number') {
-        documentVersionRef.current = payload.version;
-      }
-
-      if (payload.userId === user?.id && pendingContentRef.current > 0) {
-        pendingContentRef.current -= 1;
-        if (pendingContentRef.current < 0) {
-          pendingContentRef.current = 0;
-        }
-        syncPendingIndicators();
-      }
-      setIsEditorEmpty(quill.getLength() === 1);
-    };
-
-    const handleDocumentError = (payload: { code?: string; message?: string }) => {
-      if (payload?.code === 'conflict') {
-        console.warn('Document version conflict detected, rejoining room.');
-        pendingContentRef.current = 0;
-        syncPendingIndicators();
-        if (joinPayloadRef.current) {
-          socket.emit('document:join', joinPayloadRef.current);
-        }
-      } else {
-        console.error('Document error', payload);
-      }
-    };
-
-    const handleCursor = (payload: {
-      documentId?: string;
-      userId?: string;
-      range?: RangeStatic | null;
-      displayName?: string;
-      color?: string;
-    }) => {
-      if (payload.documentId !== fileId || !payload.userId || payload.userId === user?.id) {
-        return;
-      }
-      const cursorsModule = cursorsRef.current ?? quill.getModule('cursors');
-      cursorsRef.current = cursorsModule;
-      if (!cursorsModule) {
-        return;
-      }
-      const color = payload.color ?? ensurePresenceColor(payload.userId);
-      const name = payload.displayName ?? 'Collaborator';
-      cursorsModule.createCursor(payload.userId, name, color);
-      if (payload.range) {
-        cursorsModule.moveCursor(payload.userId, payload.range);
-      } else {
-        cursorsModule.removeCursor(payload.userId);
-      }
-    };
-
-    socket.on('document:state', handleDocumentState);
-    socket.on('document:patched', handleDocumentPatched);
-    socket.on('document:error', handleDocumentError);
-    socket.on('document:cursor', handleCursor);
-
-    return () => {
-      socket.off('document:state', handleDocumentState);
-      socket.off('document:patched', handleDocumentPatched);
-      socket.off('document:error', handleDocumentError);
-      socket.off('document:cursor', handleCursor);
-    };
-  }, [socket, quill, fileId, user, applyLocalUpdate, syncPendingIndicators, ensurePresenceColor]);
+  }, [quill, fileId, applyLocalUpdate, queueUpdate]);
 
   return (
     <>
@@ -920,7 +780,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
                             variant="link"
                             size="sm"
                             className="h-auto p-0 text-destructive"
-                            onClick={() => handleRemoveCollaborator(member.id ?? '')}
+                            onClick={() =>
+                              handleRemoveCollaborator(resolveWorkspaceOwnerId(member) ?? member.id ?? '')
+                            }
                           >
                             Remove
                           </Button>
@@ -931,7 +793,9 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
                   {dirType === 'workspace' && member.id && member.id !== user?.id && (
                     <button
                       type="button"
-                      onClick={() => handleRemoveCollaborator(member.id ?? '')}
+                      onClick={() =>
+                        handleRemoveCollaborator(resolveWorkspaceOwnerId(member) ?? member.id ?? '')
+                      }
                       className="absolute -top-1 -right-1 rounded-full bg-background/90 p-[2px] text-muted-foreground shadow-sm ring-1 ring-border transition hover:text-destructive"
                       aria-label={`Remove ${member.email ?? 'collaborator'}`}
                     >
@@ -1098,6 +962,8 @@ const QuillEditor = React.forwardRef<QuillEditorHandle, QuillEditorProps>(
           )}
         </div>
       </div>
+
+      {/* Collaboration UI temporarily disabled */}
     </>
   );
   }

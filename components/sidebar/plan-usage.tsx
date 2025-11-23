@@ -5,15 +5,19 @@ import type { SubscriptionDto } from '@/lib/queries';
 import React, { useMemo } from 'react';
 import { Progress } from '../ui/progress';
 import CypressDiamondIcon from '../icons/cypressDiamongIcon';
+import TooltipComponent from '../global/tooltip-component';
+import { twMerge } from 'tailwind-merge';
 
 interface PlanUsageProps {
   foldersLength: number;
   subscription: SubscriptionDto | null;
+  collapsed?: boolean;
 }
 
 const PlanUsage: React.FC<PlanUsageProps> = ({
   foldersLength,
   subscription,
+  collapsed = false,
 }) => {
   const { workspaceId, state } = useAppState();
 
@@ -29,6 +33,23 @@ const PlanUsage: React.FC<PlanUsageProps> = ({
     const totalFolders = stateFoldersLength ?? foldersLength;
     return (totalFolders / MAX_FOLDERS_FREE_PLAN) * 100;
   }, [state, workspaceId, foldersLength]);
+
+  if (collapsed) {
+    const message = isProPlan
+      ? 'Pro plan'
+      : `Free plan · ${Math.min(100, Math.round(usagePercentage))}% of folder quota used`;
+    return (
+      <TooltipComponent message={message}>
+        <div
+          className={twMerge(
+            'flex h-10 w-10 items-center justify-center rounded-xl border border-border/60 bg-background/70 text-muted-foreground transition hover:text-foreground'
+          )}
+        >
+          <CypressDiamondIcon />
+        </div>
+      </TooltipComponent>
+    );
+  }
 
   return (
     <article className="mb-4">

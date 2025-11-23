@@ -1,11 +1,43 @@
 import { getStoredUser } from '@/lib/auth/storage';
+import { extractUserSecretId } from '@/lib/auth/user';
 
-const NOTES_API_BASE_URL = (process.env.NEXT_PUBLIC_NOTES_API_BASE_URL ?? 'http://localhost:8089/api').replace(/\/$/, '');
-const USERS_API_BASE_URL = (process.env.NEXT_PUBLIC_USERS_API_BASE_URL ?? 'http://localhost:8089/api').replace(/\/$/, '');
-const AI_API_BASE_URL = (process.env.NEXT_PUBLIC_AI_API_BASE_URL ?? 'http://localhost:8089/api/ai').replace(/\/$/, '');
+const normalizeBaseUrl = (candidate: string | undefined | null, fallback: string) => {
+  const raw = candidate && candidate.trim().length > 0 ? candidate.trim() : fallback;
+  return raw.replace(/\/$/, '');
+};
 
-// 🔐 cookie name for server-side auth (set this to whatever you set your JWT cookie to)
-const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME ?? 'token';
+const API_GATEWAY_BASE_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_API_GATEWAY_BASE_URL ?? process.env.API_GATEWAY_BASE_URL,
+  'http://localhost:8080'
+);
+
+const PRIMARY_API_BASE_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_API_BASE_URL,
+  `${API_GATEWAY_BASE_URL}/api`
+);
+
+const NOTES_API_BASE_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_NOTES_API_BASE_URL,
+  PRIMARY_API_BASE_URL
+);
+
+const USERS_API_BASE_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_USERS_API_BASE_URL,
+  PRIMARY_API_BASE_URL
+);
+
+const aiPrefix = process.env.NEXT_PUBLIC_AI_API_PREFIX;
+const DEFAULT_AI_BASE = aiPrefix
+  ? normalizeBaseUrl(
+      `${API_GATEWAY_BASE_URL}${aiPrefix.startsWith('/') ? aiPrefix : `/${aiPrefix}`}`,
+      `${PRIMARY_API_BASE_URL}/ai`
+    )
+  : `${PRIMARY_API_BASE_URL}/ai`;
+
+const AI_API_BASE_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_AI_API_BASE_URL,
+  DEFAULT_AI_BASE
+);
 
 type UUID = string;
 
@@ -17,6 +49,53 @@ export interface TitleRequest {
 export interface SummaryRequest {
   fileId: UUID;
   maxWords: number;
+}
+
+export interface ComposeRequest {
+  workspaceId?: UUID;
+  folderId?: UUID;
+  instructions: string;
+}
+
+export interface WorkspaceCompositionResult {
+  workspaceId: UUID;
+  workspaceCreated: boolean;
+  workspaceTitle: string;
+  folderId: UUID;
+  folderCreated: boolean;
+  folderTitle: string;
+  fileId: UUID;
+  fileCreated: boolean;
+  fileTitle: string;
+}
+
+export interface AiCapabilities {
+  mode: string;
+  allowed: string[];
+  disallowed: string[];
+  guidance: string;
+}
+
+export interface AiStreamEvent {
+  event: string;
+  data: string;
+  id?: string;
+  retry?: number;
+  raw: string;
+}
+
+export interface AiStreamHandlers<TChunk = string> {
+  onEvent?: (event: AiStreamEvent) => void;
+  onStart?: (event: AiStreamEvent) => void;
+  onChunk?: (chunk: TChunk, event: AiStreamEvent) => void;
+  onDone?: (event: AiStreamEvent) => void;
+  onError?: (error: Error, event?: AiStreamEvent) => void;
+  onFinish?: () => void;
+}
+
+export interface AiStreamSubscription {
+  cancel: () => void;
+  signal: AbortSignal;
 }
 
 export interface AiResponse {
@@ -34,6 +113,8 @@ export interface FileDto {
   title: string;
   iconId: string;
   data: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
   inTrash: boolean | null;
   bannerUrl: string | null;
   workspaceId: UUID;
@@ -114,13 +195,19 @@ export interface CustomerDto {
 }
 
 export interface UserDto {
-  id: UUID;
-  fullName: string | null;
-  avatarUrl: string | null;
-  billingAddress: Record<string, unknown> | null;
-  updatedAt: string | null;
-  paymentMethod: Record<string, unknown> | null;
-  email: string | null;
+  id?: UUID | string;
+  userId?: UUID | string | number;
+  userSecretId?: UUID | string;
+  email?: string | null;
+  fullName?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  avatarUrl?: string | null;
+  billingAddress?: Record<string, unknown> | null;
+  updatedAt?: string | null;
+  paymentMethod?: Record<string, unknown> | null;
+  roles?: string[] | null;
+  [key: string]: unknown;
 }
 
 export interface WorkspaceDto {
@@ -169,43 +256,108 @@ async function withAuthHeaders(headers: Headers, skipAuth?: boolean) {
   if (skipAuth) return;
 
   // Client: use localStorage (unchanged behavior)
-  if (typeof window !== 'undefined') {
-    const stored = getStoredUser<UserDto & { token?: string }>();
-    const token = stored?.token;
-    if (token && !headers.has('Authorization')) {
-      headers.set('Authorization', `Bearer ${token}`);
+  // Helper to try to decode JWT without verification (client-side hint)
+  function tryDecodeJwtSub(jwt?: string): string | undefined {
+    if (!jwt) return undefined;
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return undefined;
+    try {
+      const payload = JSON.parse(typeof atob !== 'undefined' ? atob(parts[1]) : Buffer.from(parts[1], 'base64').toString('utf8')) as Record<string, unknown>;
+      const sub = (payload['sub'] || payload['userId'] || payload['uid']) as string | undefined;
+      return sub;
+    } catch {
+      return undefined;
     }
-    return;
   }
 
-  // Server: read HTTP-only cookie
-  try {
-    const { cookies } = await import('next/headers');
-    const cookieStore = await cookies();
-    const token = cookieStore.get(AUTH_COOKIE_NAME)?.value;
-    if (token && !headers.has('Authorization')) {
-      headers.set('Authorization', `Bearer ${token}`);
-    }
-  } catch {
-    // no-op: next/headers unavailable in some build contexts
+  if (typeof window === 'undefined') return;
+
+  const stored = getStoredUser<UserDto & { token?: string | null; refreshToken?: string | null }>();
+  const token = stored?.token ?? undefined;
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  // Provide X-User-Id header if backend requires it
+  const userId =
+    extractUserSecretId(stored) ??
+    stored?.userSecretId ??
+    stored?.id ??
+    stored?.userId ??
+    tryDecodeJwtSub(token);
+  if (userId && !headers.has('X-User-Id')) {
+    headers.set('X-User-Id', String(userId));
   }
 }
 
 async function request<T>(url: string, init: RequestInit = {}, options: { skipAuth?: boolean } = {}): Promise<T> {
   const headers = new Headers(init.headers ?? {});
-  if (!headers.has('Content-Type') && init.body !== undefined) {
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  if (!headers.has('Content-Type') && init.body !== undefined && !isFormData) {
     headers.set('Content-Type', 'application/json');
   }
 
   await withAuthHeaders(headers, options.skipAuth);
 
+  // Log file update requests with database data
+  if (url.includes('/files/') && init.method === 'PUT' && init.body) {
+    try {
+      const bodyData = JSON.parse(init.body as string)
+      if (bodyData.data) {
+        const parsedData = JSON.parse(bodyData.data)
+        const dbBlocks = parsedData.filter((b: any) => b.type?.startsWith('database_'))
+        if (dbBlocks.length > 0) {
+          console.log("[API] Sending file update with database blocks:", {
+            url,
+            databaseBlocks: dbBlocks.map((b: any) => ({
+              type: b.type,
+              id: b.id,
+              recordsCount: b.records?.length ?? 0,
+              records: b.records
+            }))
+          })
+        }
+      }
+    } catch (e) {
+      // Ignore parse errors
+    }
+  }
+
   const response = await fetch(url, {
     ...init,
     headers,
+    credentials: 'include',
   });
 
+  const contentType = response.headers.get('Content-Type') ?? '';
+  const isJson = contentType.includes('application/json');
+  let payload: unknown = null;
+
+  if (response.status !== 204) {
+    if (isJson) {
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+    } else {
+      try {
+        payload = await response.text();
+      } catch {
+        payload = null;
+      }
+    }
+  }
+
   if (!response.ok) {
-    const message = await extractErrorMessage(response);
+    const message = extractErrorMessageFromPayload(payload, response);
+    if (typeof console !== 'undefined') {
+      console.error('[API Error]', {
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        message,
+      });
+    }
     throw new Error(message);
   }
 
@@ -213,28 +365,212 @@ async function request<T>(url: string, init: RequestInit = {}, options: { skipAu
     return undefined as T;
   }
 
-  return (await response.json()) as T;
+  if (!isJson) {
+    return payload as T;
+  }
+
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>;
+    // Only extract 'data' if it looks like a wrapper object (has ONLY 'data' or very few top-level keys)
+    // This prevents extracting the 'data' field from DTOs like FileDto that have 'data' as a content field
+    if ('data' in record) {
+      const keys = Object.keys(record);
+      // If the object only has 'data' key or 'data' + a few metadata keys like 'message', 'status', it's likely a wrapper
+      const isWrapper = keys.length <= 3 && !('id' in record) && !('title' in record);
+      if (isWrapper) {
+        const data = record['data'] as T;
+        return data;
+      }
+    }
+  }
+
+  // Log file GET responses with database data
+  if (url.includes('/files/') && init.method !== 'PUT' && payload && typeof payload === 'object') {
+    const filePayload = payload as any
+    if (filePayload.data) {
+      try {
+        const parsedData = typeof filePayload.data === 'string' ? JSON.parse(filePayload.data) : filePayload.data
+        const dbBlocks = Array.isArray(parsedData) ? parsedData.filter((b: any) => b.type?.startsWith('database_')) : []
+        if (dbBlocks.length > 0) {
+          console.log("[API] Received file GET response with database blocks:", {
+            url,
+            fileId: filePayload.id,
+            databaseBlocks: dbBlocks.map((b: any) => ({
+              type: b.type,
+              id: b.id,
+              recordsCount: b.records?.length ?? 0,
+              records: b.records
+            }))
+          })
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+  }
+
+  console.log('payload ',payload)
+  return payload as T;
+}
+
+async function streamRequest(
+  url: string,
+  init: RequestInit = {},
+  handlers: AiStreamHandlers = {},
+  options: { skipAuth?: boolean; signal?: AbortSignal } = {}
+): Promise<void> {
+  const headers = new Headers(init.headers ?? {});
+  if (!headers.has('Accept')) {
+    headers.set('Accept', 'text/event-stream');
+  }
+  const isFormData = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  if (!headers.has('Content-Type') && init.body !== undefined && !isFormData) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  await withAuthHeaders(headers, options.skipAuth);
+
+  const controller = options.signal ? undefined : new AbortController();
+  const signal = options.signal ?? controller!.signal;
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      headers,
+      credentials: 'include',
+      signal,
+    });
+
+    if (!response.ok) {
+      const message = await extractErrorMessage(response);
+      throw new Error(message);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('Unable to read AI stream.');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const parseEvent = (raw: string): AiStreamEvent => {
+      const lines = raw.split('\n');
+      let eventName = 'message';
+      let data = '';
+      let id: string | undefined;
+      let retry: number | undefined;
+
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          if (data.length > 0) {
+            data += '\n';
+          }
+          data += line.slice(5).trimStart();
+        } else if (line.startsWith('id:')) {
+          id = line.slice(3).trim();
+        } else if (line.startsWith('retry:')) {
+          const parsed = Number.parseInt(line.slice(6).trim(), 10);
+          retry = Number.isNaN(parsed) ? undefined : parsed;
+        }
+      }
+
+      return {
+        event: eventName,
+        data,
+        id,
+        retry,
+        raw,
+      };
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const rawEvent = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 2);
+
+        if (rawEvent.length > 0) {
+          const parsed = parseEvent(rawEvent);
+          handlers.onEvent?.(parsed);
+
+          if (parsed.event.endsWith('-start')) {
+            handlers.onStart?.(parsed);
+          } else if (parsed.event.endsWith('-chunk')) {
+            handlers.onChunk?.(parsed.data, parsed);
+          } else if (parsed.event.endsWith('-done')) {
+            handlers.onDone?.(parsed);
+          } else if (parsed.event.endsWith('-error')) {
+            handlers.onError?.(new Error(parsed.data || 'AI stream failed.'), parsed);
+          }
+        }
+
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+  } catch (error) {
+    if ((error as DOMException)?.name === 'AbortError' || (error as Error)?.message === 'The user aborted a request.') {
+      handlers.onFinish?.();
+      return;
+    }
+    handlers.onError?.(error as Error);
+  } finally {
+    handlers.onFinish?.();
+    controller?.abort();
+  }
+}
+
+function extractErrorMessageFromPayload(payload: unknown, response: Response): string {
+  if (typeof payload === 'string' && payload.trim().length > 0) {
+    return payload;
+  }
+
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>;
+    const error = record['error'];
+    if (error && typeof error === 'object') {
+      const errorRecord = error as Record<string, unknown>;
+      if (typeof errorRecord['message'] === 'string' && errorRecord['message']!.length > 0) {
+        return errorRecord['message'] as string;
+      }
+    }
+    if (typeof record['message'] === 'string' && (record['message'] as string).length > 0) {
+      return record['message'] as string;
+    }
+  }
+
+  return `${response.status} ${response.statusText}`;
 }
 
 async function extractErrorMessage(response: Response): Promise<string> {
   try {
-    const data = await response.json();
-    if (typeof data === 'string') {
-      return data;
+    const cloned = response.clone();
+    const contentType = cloned.headers.get('Content-Type') ?? '';
+    if (contentType.includes('application/json')) {
+      const payload = await cloned.json().catch(() => null);
+      return extractErrorMessageFromPayload(payload, response);
     }
-    if (data && typeof data === 'object' && 'message' in data && typeof (data as any).message === 'string') {
-      return (data as any).message;
+    const text = await cloned.text();
+    if (typeof text === 'string' && text.trim().length > 0) {
+      return text;
     }
-    return JSON.stringify(data);
   } catch {
-    return `${response.status} ${response.statusText}`;
+    // ignore
   }
+  return `${response.status} ${response.statusText}`;
 }
 
 function buildUrl(base: string, path: string, query?: Record<string, unknown>): string {
-  const normalizedBase = base.endsWith('/') ? base : `${base}/`;
-  const normalizedPath = path.startsWith('/') ? path.slice(1) : path;
-  const url = new URL(normalizedPath, normalizedBase);
+  const normalizedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const url = new URL(`${normalizedBase}${normalizedPath}`);
 
   if (query) {
     for (const [key, value] of Object.entries(query)) {
@@ -259,6 +595,157 @@ function pageParams(options?: PageRequestOptions) {
   return entries;
 }
 
+export interface LoginRequest {
+  email: string;
+  password: string;
+  rememberMe?: boolean;
+  authType?: string;
+}
+
+export interface SignupRequest {
+  email: string;
+  fullName?: string;
+  password?: string;
+}
+
+export interface LoginResult {
+  accessToken: string;
+  refreshToken?: string | null;
+  mfaEnabled?: boolean;
+  secretImageUri?: string | null;
+  user: UserDto;
+  userId?: string | number;
+}
+
+export interface RefreshResult {
+  accessToken: string;
+  refreshToken?: string | null;
+}
+
+export async function signupRequest(payload: SignupRequest): Promise<LoginResult> {
+  const url = usersUrl('/users/register');
+  const body: Record<string, unknown> = {
+    email: payload.email,
+    fullName: payload.fullName ?? payload.email,
+  };
+  if (payload.password) {
+    body.password = payload.password;
+  }
+
+  try {
+    return await request<LoginResult>(
+      url,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+      { skipAuth: true }
+    );
+  } catch (error) {
+    console.warn('[Auth] signupRequest failed, falling back to local stub response.', error);
+    const fallbackId = `user-${Date.now()}`;
+    const fullName = payload.fullName ?? payload.email;
+    const [firstName, ...rest] = fullName.split(' ').filter(Boolean);
+    const fallbackUser: UserDto = {
+      id: fallbackId,
+      userId: fallbackId,
+      userSecretId: fallbackId,
+      email: payload.email,
+      fullName,
+      firstName: firstName ?? fullName,
+      lastName: rest.length > 0 ? rest.join(' ') : null,
+      avatarUrl: null,
+      roles: ['USER'],
+    };
+    return {
+      accessToken: `mock-signup-token-${Date.now()}`,
+      refreshToken: null,
+      user: fallbackUser,
+      userId: fallbackUser.id,
+    };
+  }
+}
+
+export async function loginRequest(payload: LoginRequest): Promise<LoginResult> {
+  const url = usersUrl('/users/authenticate');
+  const body = {
+    email: payload.email,
+    password: payload.password,
+    authType: payload.authType ?? 'EMAIL',
+    rememberMe: payload.rememberMe ?? false,
+  };
+  return request<LoginResult>(url, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, { skipAuth: true });
+}
+
+export async function refreshSession(refreshToken?: string): Promise<RefreshResult> {
+  if (!refreshToken) {
+    throw new Error('Missing refresh token');
+  }
+  const url = usersUrl('/users/refresh-token', { refreshToken });
+  const body = { refreshToken };
+  return request<RefreshResult>(url, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }, { skipAuth: true });
+}
+
+export async function logoutRequest(refreshToken?: string): Promise<{ revoked: boolean }> {
+  // backend does not offer a logout route; consider this a client-side operation
+  return { revoked: true };
+}
+
+export async function fetchCurrentUser(email: string): Promise<UserDto> {
+  if (!email) {
+    throw new Error('Email is required to fetch user profile');
+  }
+  const url = usersUrl('/users/email', { email });
+  return request<UserDto>(url);
+}
+
+export async function getUser(identifier: string): Promise<UserDto> {
+  if (!identifier) {
+    throw new Error('User identifier is required');
+  }
+
+  if (identifier.includes('@')) {
+    return fetchCurrentUser(identifier);
+  }
+
+  try {
+    const url = usersUrl('/users', { id: identifier });
+    return await request<UserDto>(url);
+  } catch {
+    try {
+      const page = await listUsers({ q: identifier, size: 5 });
+      const match =
+        page.content.find(
+          (item) =>
+            item.id === identifier ||
+            (item.userId && String(item.userId) === identifier) ||
+            item.userSecretId === identifier
+        ) ?? null;
+      if (match) {
+        return match;
+      }
+    } catch {
+      // swallow and fall through to placeholder
+    }
+  }
+
+  return {
+    id: identifier,
+    email: identifier.includes('@') ? identifier : null,
+    fullName: null,
+    avatarUrl: null,
+    billingAddress: null,
+    updatedAt: null,
+    paymentMethod: null,
+  };
+}
+
 export async function suggestTitle(body: TitleRequest): Promise<AiResponse> {
   const url = aiUrl('/suggest-title');
   return request<AiResponse>(url, {
@@ -275,37 +762,104 @@ export async function summarizeFile(body: SummaryRequest): Promise<AiResponse> {
   });
 }
 
+interface AiStreamOptions {
+  signal?: AbortSignal;
+  skipAuth?: boolean;
+  headers?: HeadersInit;
+}
+
+function startAiStream(
+  endpoint: string,
+  body: unknown,
+  handlers: AiStreamHandlers,
+  options: AiStreamOptions = {}
+): AiStreamSubscription {
+  const controller = new AbortController();
+
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+  }
+
+  const signal = controller.signal;
+  const headers = options.headers;
+
+  void streamRequest(
+    aiUrl(endpoint),
+    {
+      method: 'POST',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      headers,
+    },
+    handlers,
+    { skipAuth: options.skipAuth, signal }
+  );
+
+  return {
+    cancel: () => controller.abort(),
+    signal,
+  };
+}
+
+export function streamSuggestTitle(body: TitleRequest, handlers: AiStreamHandlers = {}, options?: AiStreamOptions): AiStreamSubscription {
+  return startAiStream('/suggest-title', body, handlers, options);
+}
+
+export function streamSummarizeFile(body: SummaryRequest, handlers: AiStreamHandlers = {}, options?: AiStreamOptions): AiStreamSubscription {
+  return startAiStream('/summarize-file', body, handlers, options);
+}
+
+export function streamComposeWorkspace(body: ComposeRequest, handlers: AiStreamHandlers = {}, options?: AiStreamOptions): AiStreamSubscription {
+  return startAiStream('/compose', body, handlers, options);
+}
+
+export function fetchAiCapabilities(): Promise<AiCapabilities> {
+  return request<AiCapabilities>(aiUrl('/capabilities'));
+}
+
 export type CollaboratorCreateInput = Omit<CollaboratorDto, 'id'>;
 
 export async function createCollaborator(dto: CollaboratorCreateInput): Promise<CollaboratorDto> {
-  const url = notesUrl('/collaborators');
-  return request<CollaboratorDto>(url, {
-    method: 'POST',
-    body: JSON.stringify(dto),
-  });
+  console.warn('[Collaboration] createCollaborator is disabled in this build. Returning stub collaborator.');
+  return {
+    id: `collaborator-stub-${Date.now()}`,
+    workspaceId: dto.workspaceId,
+    userId: dto.userId,
+  };
 }
 
 export async function getCollaborator(id: UUID): Promise<CollaboratorDto> {
-  const url = notesUrl(`/collaborators/${id}`);
-  return request<CollaboratorDto>(url);
+  console.warn('[Collaboration] getCollaborator is disabled in this build. Returning stub collaborator.');
+  return {
+    id,
+    workspaceId: 'stub-workspace',
+    userId: 'stub-user',
+  };
 }
 
-export async function listCollaborators(params: {
+export async function listCollaborators(_: {
   workspaceId?: UUID;
   userId?: UUID;
 } & PageRequestOptions = {}): Promise<Page<CollaboratorDto>> {
-  const { workspaceId, userId, ...page } = params;
-  const url = notesUrl('/collaborators', {
-    workspaceId,
-    userId,
-    ...pageParams(page),
-  });
-  return request<Page<CollaboratorDto>>(url);
+  console.warn('[Collaboration] listCollaborators is disabled in this build. Returning empty list.');
+  return {
+    content: [],
+    empty: true,
+    first: true,
+    last: true,
+    number: 0,
+    numberOfElements: 0,
+    size: 0,
+    totalElements: 0,
+    totalPages: 0,
+  };
 }
 
 export async function deleteCollaborator(id: UUID): Promise<void> {
-  const url = notesUrl(`/collaborators/${id}`);
-  await request<void>(url, { method: 'DELETE' });
+  console.warn('[Collaboration] deleteCollaborator is disabled in this build. No action taken.', { id });
 }
 
 export type FileCreateInput = Omit<FileDto, 'id' | 'inTrash'> & { inTrash?: boolean };
@@ -320,7 +874,10 @@ export async function createFile(dto: FileCreateInput): Promise<FileDto> {
 
 export async function getFile(id: UUID): Promise<FileDto> {
   const url = notesUrl(`/files/${id}`);
-  return request<FileDto>(url);
+  console.log(url)
+  const result = await request<FileDto>(url);
+  console.log('result ', result)
+  return result;
 }
 
 export async function listFiles(params: {
@@ -572,11 +1129,6 @@ export async function createUser(dto: UserCreateInput): Promise<UserDto> {
   });
 }
 
-export async function getUser(id: UUID): Promise<UserDto> {
-  const url = usersUrl(`/users/${id}`);
-  return request<UserDto>(url);
-}
-
 export async function listUsers(params: {
   q?: string;
 } & PageRequestOptions = {}): Promise<Page<UserDto>> {
@@ -682,22 +1234,14 @@ async function uploadBinary(url: string, file: File | Blob, method: 'POST' | 'PU
 
   formData.append('file', file);
 
-  const headers: HeadersInit = {};
+  const headers: Record<string, string> = {};
 
   // Client: keep existing behavior with localStorage token
   if (typeof window !== 'undefined') {
-    const stored = getStoredUser<UserDto & { token?: string }>();
+    const stored = getStoredUser<UserDto & { token?: string | null }>();
     const token = stored?.token;
-    if (token) (headers as any).Authorization = `Bearer ${token}`;
-  } else {
-    // Server: use cookie
-    try {
-      const { cookies } = await import('next/headers');
-      const cookieStore = await cookies();
-      const token = cookieStore.get(AUTH_COOKIE_NAME)?.value;
-      if (token) (headers as any).Authorization = `Bearer ${token}`;
-    } catch {
-      // no-op
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
   }
 
@@ -873,4 +1417,87 @@ export async function getActiveProductsWithPrice(): Promise<{
   } catch (error) {
     return { data: [], error: error as Error };
   }
+}
+
+// Collaboration Room Management Types and Functions
+export interface RoomInfo {
+  roomId: string;
+  wsUrl: string;
+  joinToken: string;
+  expiresAt: string;
+}
+
+export interface BootstrapData {
+  snapshot: {
+    clock?: number;
+    payload?: string;
+    version?: number;
+    content?: string;
+  };
+  presence: PresenceUser[];
+}
+
+export interface PresenceUser {
+  userId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  status: 'join' | 'leave' | 'heartbeat';
+  at: number;
+}
+
+export interface CursorPosition {
+  blockId: string;
+  offset: number;
+}
+
+export interface SelectionRange {
+  blockId: string;
+  from: number;
+  to: number;
+}
+
+export interface CollaborationMessage {
+  type: 'presence' | 'cursor' | 'selection' | 'crdt' | 'op' | 'system';
+  userId?: string;
+  fileId?: string;
+  status?: 'join' | 'leave' | 'heartbeat';
+  pos?: CursorPosition;
+  range?: SelectionRange;
+  update?: string;
+  clientId?: string;
+  clock?: number;
+  baseVersion?: number;
+  ops?: Record<string, unknown>[];
+  opId?: string;
+  action?: 'room_closed';
+  reason?: 'expired' | 'admin_closed';
+  at: number;
+}
+
+// Room Management API Functions
+export async function createRoom(fileId: UUID, workspaceId: UUID): Promise<RoomInfo> {
+  const url = notesUrl('/rooms');
+  return request<RoomInfo>(url, {
+    method: 'POST',
+    body: JSON.stringify({ fileId, workspaceId }),
+  });
+}
+
+export async function joinRoom(roomId: string): Promise<RoomInfo> {
+  const url = notesUrl(`/rooms/${roomId}/join`);
+  return request<RoomInfo>(url, {
+    method: 'POST',
+  });
+}
+
+export async function leaveRoom(roomId: string): Promise<void> {
+  const url = notesUrl(`/rooms/${roomId}/leave`);
+  await request<void>(url, {
+    method: 'POST',
+  });
+}
+
+export async function getBootstrapData(fileId: UUID): Promise<BootstrapData> {
+  const url = notesUrl(`/files/${fileId}/bootstrap`);
+  return request<BootstrapData>(url);
 }

@@ -5,22 +5,29 @@ import { useAppState } from "@/lib/providers/state-provider"
 import type { appFoldersType, appWorkspacesType } from "@/lib/providers/state-provider"
 import type { FileDto, FolderDto, UserDto, WorkspaceDto } from "@/lib/queries"
 import { usePathname, useRouter } from "next/navigation"
-import { useSocket } from "@/lib/providers/socket-provider"
+// import { useCollaboration } from "@/lib/providers/collaboration-provider"
+// import { CollaborationIndicator } from "@/components/collaboration/collaboration-indicator"
+// import { CursorOverlay } from "@/components/collaboration/cursor-overlay"
+// import { PresencePanel } from "@/components/collaboration/presence-panel"
+// import { useCRDTOperations } from "@/hooks/use-crdt-operations"
 import { useAuth } from "@/lib/providers/auth-provider"
 import { useToast } from "../ui/use-toast"
-import { getFile, updateFile, updateFolder, updateWorkspace } from "@/lib/queries"
+import { getFile, updateFile, updateFolder, updateWorkspace, listCollaborators, getUser, createCollaborator, deleteCollaborator } from "@/lib/queries"
+import { resolveWorkspaceOwnerId } from "@/lib/auth/user"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { Badge } from "../ui/badge"
-import { Loader2, GripVertical } from "lucide-react"
+import { Loader2, GripVertical, Share2, XCircleIcon } from "lucide-react"
 import Image from "next/image"
 import EmojiPicker from "../global/emoji-picker"
 import BannerUpload from "../banner-upload/banner-upload"
-import type { Block, BlockType, NotionEditorState } from "@/lib/notion-types"
+import type { Block, BlockType, NotionEditorState, TableOfContentsBlock, SyncedBlock } from "@/lib/notion-types"
 import { BlockRenderer } from "@/components/notion-editor/block-renderer"
 import { CommandPalette } from "@/components/notion-editor/command-palette"
 import { BlockToolbar } from "@/components/notion-editor/block-toolbar"
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd"
+import CollaboratorSearch from "../global/collaborator-search"
+import { Avatar, AvatarFallback, AvatarImage } from "../ui/avatar"
 
 export interface NotionEditorHandle {
   flushPending: () => Promise<void>
@@ -50,9 +57,11 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
   const { state, workspaceId, folderId, dispatch } = useAppState()
   const { user } = useAuth()
   const router = useRouter()
-  const { socket } = useSocket()
+  // const collaboration = useCollaboration()
   const pathname = usePathname()
   const { toast } = useToast()
+  
+  // const crdt = useCRDTOperations(fileId, workspaceId)
 
   // State management
   const [editorState, setEditorState] = useState<NotionEditorState>({
@@ -73,15 +82,23 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
   const [commandTargetBlockId, setCommandTargetBlockId] = useState<string | null>(null)
   const [bannerRefreshKey, setBannerRefreshKey] = useState(0)
   const [localBannerUrl, setLocalBannerUrl] = useState<string | null>(null)
+  // const [showPresencePanel, setShowPresencePanel] = useState(false)
 
   // Refs
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingUpdateRef = useRef<Partial<WorkspaceDto & FolderDto & FileDto>>({})
-  const pendingContentRef = useRef<number>(0)
-  const documentVersionRef = useRef<number>(0)
+  // const pendingContentRef = useRef<number>(0)
+  // const documentVersionRef = useRef<number>(0)
   const disposedRef = useRef<boolean>(false)
   const collaboratorMapRef = useRef<Map<string, string>>(new Map())
   const isDraggingRef = useRef<boolean>(false)
+  const lastSerializedBlocksRef = useRef<string | null>(null)
+  const blocksDirtyRef = useRef<boolean>(false)
+  const previousFocusedBlockRef = useRef<string | null>(null)
+  const pendingDatabasePersistFrameRef = useRef<number | null>(null)
+  const persistBlocksIfDirtyRef = useRef<(reason?: string, immediate?: boolean) => void>(() => {})
+  const needsImmediatePersistRef = useRef<boolean>(false)
+  const editorStateRef = useRef<NotionEditorState>(editorState)
 
   // Generate unique ID for blocks
   const generateId = useCallback(() => {
@@ -117,7 +134,13 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         case "quote":
           return { ...baseBlock, type: "quote" }
         case "code":
-          return { ...baseBlock, type: "code", language: "javascript" }
+          return {
+            ...baseBlock,
+            type: "code",
+            language: "web",
+            previewEnabled: false,
+            sources: { html: "", css: "", javascript: "" },
+          }
         case "callout":
           return { ...baseBlock, type: "callout", icon: "💡", color: "default" }
         case "divider":
@@ -139,7 +162,13 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         case "embed":
           return { ...baseBlock, type: "embed", content: "", url: "", provider: "other", title: "" }
         case "synced_block":
-          return { ...baseBlock, type: "synced_block", content: "", originalBlockId: "", isOriginal: true }
+          return {
+            ...baseBlock,
+            type: "synced_block",
+            content: "",
+            originalBlockId: baseBlock.id,
+            isOriginal: true,
+          }
         case "template_button":
           return { ...baseBlock, type: "template_button", templateBlocks: [] }
         case "breadcrumb":
@@ -252,6 +281,7 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         } else {
           newBlocks.push(newBlock)
         }
+        blocksDirtyRef.current = true
         return {
           ...prev,
           blocks: newBlocks as Block[],
@@ -260,6 +290,15 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
           lastModified: new Date().toISOString(),
         }
       })
+    },
+    [createBlock],
+  )
+
+  const buildBlockDefaults = useCallback(
+    (type: BlockType): Partial<Block> => {
+      const newBlock = createBlock(type)
+      const { id, createdAt, updatedAt, ...rest } = newBlock
+      return rest
     },
     [createBlock],
   )
@@ -288,6 +327,7 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         }
 
         const focusTargetId = focusNewBlock || afterIndex === -1 ? newBlock.id : afterBlockId
+        blocksDirtyRef.current = true
 
         return {
           ...prev,
@@ -304,6 +344,9 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
   const deleteBlock = useCallback((blockId: string) => {
     setEditorState((prev): NotionEditorState => {
       const newBlocks = prev.blocks.filter((block) => block.id !== blockId)
+      if (newBlocks.length !== prev.blocks.length) {
+        blocksDirtyRef.current = true
+      }
       return {
         ...prev,
         blocks: newBlocks as Block[],
@@ -314,11 +357,99 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
     })
   }, [])
 
+  const scheduleDatabasePersist = useCallback(() => {
+    if (!blocksDirtyRef.current) return
+    if (typeof window === "undefined") {
+      persistBlocksIfDirtyRef.current("database-auto-persist")
+      return
+    }
+    if (pendingDatabasePersistFrameRef.current !== null) {
+      cancelAnimationFrame(pendingDatabasePersistFrameRef.current)
+    }
+    pendingDatabasePersistFrameRef.current = window.requestAnimationFrame(() => {
+      pendingDatabasePersistFrameRef.current = null
+      persistBlocksIfDirtyRef.current("database-auto-persist")
+    })
+  }, [])
+
   const updateBlock = useCallback((blockId: string, updates: Partial<Block>) => {
+    const isDatabaseBlockUpdate = updates && 'records' in updates
+    
     setEditorState((prev): NotionEditorState => {
+      const targetBlock = prev.blocks.find((block) => block.id === blockId)
+      if (!targetBlock) {
+        return prev as NotionEditorState
+      }
+
+      let mergedUpdates = updates
+      if (targetBlock.type === "synced_block") {
+        const syncedTarget = targetBlock as SyncedBlock
+        const nextState = { ...syncedTarget, ...updates } as SyncedBlock
+        if (nextState.isOriginal && (!nextState.originalBlockId || nextState.originalBlockId.trim().length === 0)) {
+          mergedUpdates = { ...updates, originalBlockId: targetBlock.id }
+        }
+      }
+
       const newBlocks = prev.blocks.map((block) =>
-        block.id === blockId ? { ...block, ...updates, updatedAt: new Date().toISOString() } : block,
+        block.id === blockId ? { ...block, ...mergedUpdates, updatedAt: new Date().toISOString() } : block,
       )
+      
+      const isDatabaseBlock = targetBlock.type.startsWith('database_')
+      const hasDatabaseRecordsUpdate = isDatabaseBlock && 'records' in mergedUpdates
+      
+      if (newBlocks !== prev.blocks) {
+        blocksDirtyRef.current = true
+        
+        // Log database block updates
+        if (hasDatabaseRecordsUpdate) {
+          const updatedBlock = newBlocks.find(b => b.id === blockId)
+          console.log("[NotionEditor] Database block updated with records:", {
+            blockId,
+            blockType: targetBlock.type,
+            recordsCount: (mergedUpdates as any).records?.length ?? 0,
+            actualRecords: (mergedUpdates as any).records,
+            updatedBlockRecords: (updatedBlock as any)?.records
+          })
+          // Mark that we need immediate persistence for database updates
+          needsImmediatePersistRef.current = true
+        }
+      }
+
+      if (targetBlock.type === "synced_block") {
+        const syncedTarget = { ...targetBlock, ...mergedUpdates } as SyncedBlock
+        const propagateContent = Object.prototype.hasOwnProperty.call(mergedUpdates, "content")
+        const propagateSources = Object.prototype.hasOwnProperty.call(mergedUpdates, "sources")
+        const sourceId = syncedTarget.isOriginal
+          ? syncedTarget.originalBlockId || syncedTarget.id
+          : syncedTarget.originalBlockId || ""
+
+        if (sourceId && (propagateContent || propagateSources)) {
+          newBlocks.forEach((block, index) => {
+            if (block.id === blockId || block.type !== "synced_block") return
+            const candidate = block as SyncedBlock
+            const candidateSourceId = candidate.isOriginal
+              ? candidate.originalBlockId || candidate.id
+              : candidate.originalBlockId || ""
+            if (candidateSourceId !== sourceId) return
+
+            const propagated: Partial<Block> = {}
+            if (propagateContent) {
+              propagated.content = (mergedUpdates as Block).content
+            }
+            if (propagateSources && Object.prototype.hasOwnProperty.call(mergedUpdates, "sources")) {
+              ;(propagated as any).sources = (mergedUpdates as any).sources
+            }
+            if (Object.keys(propagated).length === 0) return
+
+            newBlocks[index] = {
+              ...block,
+              ...propagated,
+              updatedAt: new Date().toISOString(),
+            } as Block
+          })
+        }
+      }
+
       return {
         ...prev,
         blocks: newBlocks as Block[],
@@ -326,6 +457,26 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
       }
     })
   }, [])
+
+  // Keep editorStateRef in sync with editorState
+  useEffect(() => {
+    editorStateRef.current = editorState
+  }, [editorState])
+
+  useEffect(() => {
+    if (!blocksDirtyRef.current) return
+    
+    // Check if we need immediate persistence for database updates
+    if (needsImmediatePersistRef.current) {
+      needsImmediatePersistRef.current = false
+      console.log("[NotionEditor] Immediate persistence triggered for database record update")
+      // Use ref which should have the latest callback
+      persistBlocksIfDirtyRef.current("database-immediate-persist", true)
+    } else {
+      // Use deferred persistence for other block types
+      scheduleDatabasePersist()
+    }
+  }, [editorState.blocks, scheduleDatabasePersist])
 
   const duplicateBlock = useCallback(
     (blockId: string) => {
@@ -339,10 +490,18 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         updatedAt: new Date().toISOString(),
       }
 
+      if (duplicatedBlock.type === "synced_block") {
+        const source = blockToDuplicate as SyncedBlock
+        const sourceId = source.isOriginal ? source.originalBlockId || source.id : source.originalBlockId
+        ;(duplicatedBlock as SyncedBlock).isOriginal = false
+        ;(duplicatedBlock as SyncedBlock).originalBlockId = sourceId || blockToDuplicate.id
+      }
+
       setEditorState((prev): NotionEditorState => {
         const blockIndex = prev.blocks.findIndex((block) => block.id === blockId)
         const newBlocks = [...prev.blocks]
         newBlocks.splice(blockIndex + 1, 0, duplicatedBlock)
+        blocksDirtyRef.current = true
         return {
           ...prev,
           blocks: newBlocks as Block[],
@@ -354,6 +513,47 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
     },
     [editorState.blocks, generateId],
   )
+
+  useEffect(() => {
+    if (editorState.blocks.length === 0) return
+
+    const headingBlocks = editorState.blocks.filter(
+      (block) => block.type === "heading1" || block.type === "heading2" || block.type === "heading3",
+    )
+
+    const collectedHeadings = headingBlocks.map((heading) => {
+      const content = typeof heading.content === "string" ? heading.content.trim() : ""
+      return {
+        id: heading.id,
+        level: heading.type === "heading1" ? 1 : heading.type === "heading2" ? 2 : 3,
+        content: content.length > 0 ? content : "Untitled heading",
+      }
+    })
+
+    editorState.blocks.forEach((block) => {
+      if (block.type !== "table_of_contents") return
+      const tocBlock = block as TableOfContentsBlock
+      const storedHeadings = Array.isArray(tocBlock.headings) ? tocBlock.headings : []
+      const isDifferent =
+        storedHeadings.length !== collectedHeadings.length ||
+        storedHeadings.some((heading, index) => {
+          const candidate = collectedHeadings[index]
+          return (
+            !candidate ||
+            heading.id !== candidate.id ||
+            heading.level !== candidate.level ||
+            heading.content !== candidate.content
+          )
+        })
+
+      if (!Array.isArray(tocBlock.headings) || isDifferent) {
+        updateBlock(
+          block.id,
+          { headings: collectedHeadings.map((heading) => ({ ...heading })) } as Partial<Block>,
+        )
+      }
+    })
+  }, [editorState.blocks, updateBlock])
 
   const moveBlock = useCallback((blockId: string, newIndex: number) => {
     setEditorState((prev): NotionEditorState => {
@@ -384,6 +584,7 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         blocks: newBlocks as Block[],
         lastModified: new Date().toISOString(),
       }
+      blocksDirtyRef.current = true
 
       // Queue the update to persist the new block order
       pendingUpdateRef.current = {
@@ -431,9 +632,19 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
       selectedDir = state.workspaces.find((workspace) => workspace.id === fileId)
     }
 
-    const result = selectedDir
-      ? (selectedDir as WorkspaceDto | FolderDto | FileDto)
-      : (dirDetails as WorkspaceDto | FolderDto | FileDto)
+    const fallback = dirDetails as WorkspaceDto | FolderDto | FileDto
+    const merged = {
+      ...fallback,
+      ...(selectedDir ? (selectedDir as WorkspaceDto | FolderDto | FileDto) : {}),
+    }
+
+    const result: WorkspaceDto | FolderDto | FileDto = {
+      ...merged,
+      title: merged.title ?? fallback.title,
+      iconId: merged.iconId ?? fallback.iconId,
+      data: merged.data ?? fallback.data ?? null,
+      bannerUrl: merged.bannerUrl ?? fallback.bannerUrl ?? null,
+    }
 
     // Use local banner URL if available, otherwise use the result
     const finalResult = localBannerUrl !== null ? { ...result, bannerUrl: localBannerUrl } : result
@@ -513,9 +724,8 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
   )
 
   const syncPendingIndicators = useCallback(() => {
-    const hasMetadataPending = Object.keys(pendingUpdateRef.current).length > 0
-    const hasContentPending = pendingContentRef.current > 0
-    if (hasMetadataPending || hasContentPending) {
+    const hasPendingChanges = Object.keys(pendingUpdateRef.current).length > 0
+    if (hasPendingChanges) {
       setHasPending(true)
       setSaving(true)
     } else {
@@ -543,6 +753,28 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
       const ensuredIconId = (payload.iconId as string) || displayIcon || details.iconId || "📄"
 
       const updatePayload = { ...payload, title: ensuredTitle, iconId: ensuredIconId }
+      
+      // Log what's being saved, especially for data updates
+      if (updatePayload.data) {
+        try {
+          const parsedData = JSON.parse(updatePayload.data as string)
+          const databaseBlocks = parsedData.filter((b: any) => b.type?.startsWith('database_'))
+          if (databaseBlocks.length > 0) {
+            console.log("[NotionEditor] Saving file with database blocks:", {
+              fileId,
+              dirType,
+              databaseBlocks: databaseBlocks.map((b: any) => ({
+                type: b.type,
+                id: b.id,
+                recordsCount: b.records?.length ?? 0,
+                records: b.records
+              }))
+            })
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
       console.log("Updating file with payload:", updatePayload)
 
       if (dirType === "workspace") {
@@ -554,6 +786,12 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         if (!workspaceId || !folderId) return
         await updateFile(fileId, { ...updatePayload, workspaceId, folderId } as Partial<FileDto>)
       }
+      
+      console.log("[NotionEditor] Successfully saved to backend:", {
+        fileId,
+        dirType,
+        hadDataUpdate: !!updatePayload.data
+      })
     } catch (error) {
       console.error("Failed to persist editor changes", error)
       pendingUpdateRef.current = { ...payload, ...pendingUpdateRef.current }
@@ -588,13 +826,71 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
     [flushPending, syncPendingIndicators],
   )
 
+  const persistBlocksIfDirty = useCallback(
+    (reason?: string, immediate = false) => {
+      if (!blocksDirtyRef.current) return
+      try {
+        // CRITICAL: Use ref to get the LATEST blocks, not the closure variable
+        const currentBlocks = editorStateRef.current.blocks
+        const serialized = JSON.stringify(currentBlocks ?? [])
+        if (serialized === lastSerializedBlocksRef.current) {
+          blocksDirtyRef.current = false
+          return
+        }
+        
+        // Log database blocks being persisted
+        const databaseBlocks = currentBlocks.filter(b => b.type.startsWith('database_'))
+        if (databaseBlocks.length > 0) {
+          console.log("[NotionEditor] Persisting blocks:", {
+            reason,
+            immediate,
+            totalBlocks: currentBlocks.length,
+            databaseBlocks: databaseBlocks.map(b => ({
+              type: b.type,
+              id: b.id,
+              recordsCount: (b as any).records?.length ?? 0,
+              hasRecords: !!(b as any).records
+            }))
+          })
+        }
+        
+        lastSerializedBlocksRef.current = serialized
+        blocksDirtyRef.current = false
+        applyLocalUpdate({ data: serialized } as Partial<WorkspaceDto & FolderDto & FileDto>)
+        
+        if (immediate) {
+          // For database updates, save immediately without delay
+          console.log("[NotionEditor] Immediate save - bypassing queue")
+          pendingUpdateRef.current = {
+            ...pendingUpdateRef.current,
+            data: serialized
+          }
+          // Cancel any pending timer and flush immediately
+          if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current)
+            saveTimerRef.current = null
+          }
+          flushPending().catch(err => console.error("[NotionEditor] Failed to flush immediately:", err))
+        } else {
+          queueUpdate({ data: serialized })
+        }
+      } catch (error) {
+        console.error("Failed to persist blocks", { error, reason })
+      }
+    },
+    [applyLocalUpdate, queueUpdate, flushPending],
+  )
+
+  persistBlocksIfDirtyRef.current = persistBlocksIfDirty
+
   const handleManualSave = useCallback(async () => {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current)
     }
     setSaving(true)
+    persistBlocksIfDirty("manual-save")
     await flushPending()
-  }, [flushPending])
+  }, [flushPending, persistBlocksIfDirty])
 
   // Ensure there is exactly one trailing blank paragraph
   const ensureTrailingBlankAndFocus = useCallback(
@@ -625,11 +921,12 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
       if (!blocks || blocks.length === 0) return
 
       const lastBlock = blocks[blocks.length - 1]
-      if (lastBlock.id !== blockId) return
-
-      ensureTrailingBlankAndFocus()
+      if (lastBlock.id === blockId) {
+        ensureTrailingBlankAndFocus()
+      }
+      persistBlocksIfDirty("block-blur")
     },
-    [editorState.blocks, ensureTrailingBlankAndFocus],
+    [editorState.blocks, ensureTrailingBlankAndFocus, persistBlocksIfDirty],
   )
 
   useEffect(() => {
@@ -640,6 +937,15 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
       ensureTrailingBlankAndFocus(false)
     }
   }, [editorState.blocks, ensureTrailingBlankAndFocus])
+
+  useEffect(() => {
+    const previous = previousFocusedBlockRef.current
+    const current = editorState.focusedBlockId
+    if (previous && !current) {
+      persistBlocksIfDirty("focus-cleared")
+    }
+    previousFocusedBlockRef.current = current ?? null
+  }, [editorState.focusedBlockId, persistBlocksIfDirty])
 
   const handleTitleChange = useCallback(
     (value: string) => {
@@ -653,25 +959,93 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
 
   // Load blocks from data
   useEffect(() => {
-    if (details.data && !isDraggingRef.current) {
-      try {
-        const parsedBlocks = JSON.parse(details.data) as Block[]
-        if (Array.isArray(parsedBlocks)) {
-          setEditorState((prev) => {
-            // Only update if blocks have actually changed
-            const blocksChanged = JSON.stringify(prev.blocks) !== JSON.stringify(parsedBlocks)
-            if (blocksChanged) {
-              return {
-                ...prev,
-                blocks: parsedBlocks as Block[],
-              }
-            }
-            return prev
-          })
-        }
-      } catch (error) {
-        console.error("Failed to parse blocks data", error)
+    if (!details.data || isDraggingRef.current) return
+
+    try {
+      const raw = details.data
+      console.log("[NotionEditor] Loading data from backend:", {
+        dataType: typeof raw,
+        dataLength: typeof raw === 'string' ? raw.length : 'N/A',
+        dataPreview: typeof raw === 'string' ? raw.substring(0, 200) : raw
+      })
+      
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw
+      const candidateState =
+        parsed && !Array.isArray(parsed) && typeof parsed === "object" ? (parsed as Partial<NotionEditorState>) : null
+      const nextBlocks = Array.isArray(parsed)
+        ? (parsed as Block[])
+        : Array.isArray(candidateState?.blocks)
+          ? (candidateState?.blocks as Block[])
+          : null
+
+      if (!nextBlocks) {
+        console.warn("Unsupported editor payload shape; expected blocks array or NotionEditorState")
+        return
       }
+      
+      // Log database blocks being loaded
+      const databaseBlocks = nextBlocks.filter(b => b.type?.startsWith('database_'))
+      if (databaseBlocks.length > 0) {
+        console.log("[NotionEditor] Loading database blocks from backend:", {
+          totalBlocks: nextBlocks.length,
+          databaseBlocks: databaseBlocks.map(b => ({
+            type: b.type,
+            id: b.id,
+            recordsCount: (b as any).records?.length ?? 0,
+            records: (b as any).records,
+            properties: (b as any).properties
+          }))
+        })
+      }
+
+      setEditorState((prev) => {
+        const blocksChanged = JSON.stringify(prev.blocks) !== JSON.stringify(nextBlocks)
+
+        const hasSelected = candidateState
+          ? Object.prototype.hasOwnProperty.call(candidateState, "selectedBlockId")
+          : false
+        const hasFocused = candidateState
+          ? Object.prototype.hasOwnProperty.call(candidateState, "focusedBlockId")
+          : false
+        const hasComposing = candidateState
+          ? Object.prototype.hasOwnProperty.call(candidateState, "isComposing")
+          : false
+        const hasLastModified = candidateState
+          ? Object.prototype.hasOwnProperty.call(candidateState, "lastModified")
+          : false
+
+        const nextSelectedBlockId = hasSelected ? candidateState?.selectedBlockId ?? null : prev.selectedBlockId
+        const nextFocusedBlockId = hasFocused ? candidateState?.focusedBlockId ?? null : prev.focusedBlockId
+        const nextIsComposing = hasComposing ? Boolean(candidateState?.isComposing) : prev.isComposing
+        const nextLastModified =
+          hasLastModified && typeof candidateState?.lastModified === "string"
+            ? candidateState?.lastModified
+            : prev.lastModified
+
+        if (
+          !blocksChanged &&
+          nextSelectedBlockId === prev.selectedBlockId &&
+          nextFocusedBlockId === prev.focusedBlockId &&
+          nextIsComposing === prev.isComposing &&
+          nextLastModified === prev.lastModified
+        ) {
+          return prev
+        }
+
+        lastSerializedBlocksRef.current = null
+        blocksDirtyRef.current = false
+
+        return {
+          ...prev,
+          blocks: nextBlocks as Block[],
+          selectedBlockId: nextSelectedBlockId,
+          focusedBlockId: nextFocusedBlockId,
+          isComposing: nextIsComposing,
+          lastModified: nextLastModified,
+        }
+      })
+    } catch (error) {
+      console.error("Failed to parse blocks data", error)
     }
   }, [details.data])
 
@@ -723,7 +1097,38 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
   }, [showCommandPalette])
 
   // Initialize with a default paragraph block if empty
+  const hasInitialContent = useMemo(() => {
+    const raw = details.data
+    if (!raw) return false
+    const examine = (value: unknown): boolean => {
+      if (!value) return false
+      if (Array.isArray(value)) {
+        return value.length > 0
+      }
+      if (typeof value === "object") {
+        const candidate = value as Partial<NotionEditorState>
+        if (Array.isArray(candidate.blocks)) {
+          return candidate.blocks.length > 0
+        }
+        return Object.keys(candidate).length > 0
+      }
+      return typeof value === "string" && value.trim().length > 0
+    }
+    if (typeof raw === "string") {
+      const trimmed = raw.trim()
+      if (!trimmed || trimmed === "[]") return false
+      try {
+        const parsed = JSON.parse(trimmed)
+        return examine(parsed)
+      } catch {
+        return trimmed.length > 0
+      }
+    }
+    return examine(raw)
+  }, [details.data])
+
   useEffect(() => {
+    if (hasInitialContent) return
     if (editorState.blocks.length === 0) {
       const defaultBlock = createBlock("paragraph", "")
       setEditorState((prev) => ({
@@ -731,7 +1136,26 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         blocks: [defaultBlock],
       }))
     }
-  }, [editorState.blocks.length, createBlock])
+  }, [editorState.blocks.length, createBlock, hasInitialContent])
+
+  useEffect(() => {
+    lastSerializedBlocksRef.current = null
+    blocksDirtyRef.current = false
+  }, [fileId])
+
+  useEffect(() => {
+    return () => {
+      disposedRef.current = true
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current)
+      }
+      if (pendingDatabasePersistFrameRef.current !== null) {
+        cancelAnimationFrame(pendingDatabasePersistFrameRef.current)
+      }
+      persistBlocksIfDirty("unmount")
+      flushPending().catch(() => undefined)
+    }
+  }, [flushPending, persistBlocksIfDirty])
 
   // Sync local banner state with details when file changes
   useEffect(() => {
@@ -739,6 +1163,91 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
       setLocalBannerUrl(details.bannerUrl)
     }
   }, [details.bannerUrl, localBannerUrl])
+
+  // Load collaborators for workspace to support Share button
+  useEffect(() => {
+    if (!workspaceId) return
+    let active = true
+    const fetchCollaborators = async () => {
+      try {
+        const page = await listCollaborators({ workspaceId, size: 50 })
+        const entries = page.content ?? []
+        collaboratorMapRef.current.clear()
+        if (!entries.length) {
+          if (active) setCollaborators([])
+          return
+        }
+        const users = await Promise.all(
+          entries.map(async (entry: { id: string; userId: string }) => {
+            try {
+              const collaborator = await getUser(entry.userId)
+              if (collaborator) {
+                const collaboratorKey = resolveWorkspaceOwnerId(collaborator) ?? entry.userId
+                collaboratorMapRef.current.set(collaboratorKey, entry.id)
+              }
+              return collaborator
+            } catch {
+              return null
+            }
+          }),
+        )
+        if (active) setCollaborators(users.filter(Boolean) as UserDto[])
+      } catch (error) {
+        console.error("Failed to load collaborators", error)
+      }
+    }
+    fetchCollaborators()
+    return () => {
+      active = false
+    }
+  }, [workspaceId])
+
+  const handleAddCollaborator = useCallback(
+    async (profile: UserDto) => {
+      if (dirType !== "workspace") return
+      if (!profile.id) return
+      const collaboratorKey = resolveWorkspaceOwnerId(profile) ?? profile.id
+      if (collaboratorMapRef.current.has(collaboratorKey)) {
+        toast({ title: "Collaborator already added", description: "This user already has access to the workspace." })
+        return
+      }
+      try {
+        const created = await createCollaborator({ workspaceId: fileId, userId: collaboratorKey })
+        collaboratorMapRef.current.set(collaboratorKey, created.id)
+        setCollaborators((prev) => [...prev, profile])
+        toast({
+          title: "Collaborator added",
+          description: profile.email ? `${profile.email} now has access.` : "Collaborator added successfully.",
+        })
+      } catch (error) {
+        console.error("Failed to add collaborator", error)
+        toast({ title: "Unable to add collaborator", description: "Please try again later.", variant: "destructive" })
+      }
+    },
+    [dirType, fileId, toast],
+  )
+
+  const handleRemoveCollaborator = useCallback(
+    async (member: UserDto) => {
+      if (dirType !== "workspace") return
+      const collaboratorKey = resolveWorkspaceOwnerId(member) ?? member.id
+      if (!collaboratorKey) return
+      const collaboratorId = collaboratorMapRef.current.get(collaboratorKey)
+      if (!collaboratorId) return
+      try {
+        await deleteCollaborator(collaboratorId)
+        collaboratorMapRef.current.delete(collaboratorKey)
+        setCollaborators((prev) =>
+          prev.filter((c) => (resolveWorkspaceOwnerId(c) ?? c.id) !== collaboratorKey)
+        )
+        toast({ title: "Collaborator removed", description: "Access revoked successfully." })
+      } catch (error) {
+        console.error("Failed to remove collaborator", error)
+        toast({ title: "Unable to remove collaborator", description: "Please try again later.", variant: "destructive" })
+      }
+    },
+    [dirType, toast],
+  )
 
   return (
     <>
@@ -777,6 +1286,39 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
             <span>{breadCrumbs}</span>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="flex items-center justify-center h-9">
+              {collaborators.map((member) => (
+                <div key={member.id} className="relative">
+                  <div className="mr-1">
+                    <Avatar className="-ml-2 h-7 w-7 border-2 border-background/80 bg-background shadow-sm first:ml-0">
+                      <AvatarImage src={member.avatarUrl ?? undefined} className="rounded-full" />
+                      <AvatarFallback>
+                        {(member.email ?? member.fullName ?? "??").substring(0, 2).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+                  </div>
+                  {dirType === "workspace" && member.id && member.id !== user?.id && (
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveCollaborator(member)}
+                      className="absolute -top-1 -right-1 rounded-full bg-background/90 p-[2px] text-muted-foreground shadow-sm ring-1 ring-border transition hover:text-destructive"
+                      aria-label={`Remove ${member.email ?? "collaborator"}`}
+                    >
+                      <XCircleIcon className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            {dirType === "workspace" && (
+              <CollaboratorSearch existingCollaborators={collaborators} getCollaborator={handleAddCollaborator}>
+                <Button size="sm" type="button" variant="outline" className="gap-2 h-7 px-3">
+                  <Share2 className="h-4 w-4" />
+                  Share
+                </Button>
+              </CollaboratorSearch>
+            )}
+
             <Button
               size="sm"
               type="button"
@@ -812,9 +1354,8 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
 
       {details.bannerUrl && (
         <div className="relative w-full h-[200px]">
-          <Image
+          <img
             src={details.bannerUrl || "/placeholder.svg"}
-            fill
             className="w-full md:h-48 h-20 object-cover"
             alt="Banner Image"
           />
@@ -936,11 +1477,18 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
         <div
           className="max-w-[900px] relative w-full pb-32 sm:pb-40 cursor-text"
           onMouseDown={(e) => {
+            if (isDraggingRef.current) return
             const target = e.target as HTMLElement
             if (target.closest(".notion-block") || target.closest('button,[role="button"],input,textarea')) return
-            if (isDraggingRef.current) return
-            e.preventDefault()
-            ensureTrailingBlankAndFocus()
+            const activeElement = document.activeElement as HTMLElement | null
+            if (activeElement && typeof activeElement.blur === "function") {
+              activeElement.blur()
+            }
+            setEditorState((prev) => ({
+              ...prev,
+              selectedBlockId: null,
+              focusedBlockId: null,
+            }))
           }}
           aria-label="Document container"
         >
@@ -964,12 +1512,25 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
                 return
               }
 
-              moveBlock(result.draggableId, result.destination.index)
+              const targetId = result.draggableId
+              moveBlock(targetId, result.destination.index)
               setEditorState((prev) => ({
                 ...prev,
-                selectedBlockId: result.draggableId,
-                focusedBlockId: result.draggableId,
+                selectedBlockId: targetId,
+                focusedBlockId: targetId,
               }))
+
+              // Focus the editable element inside the moved block after DOM updates
+              requestAnimationFrame(() => {
+                const node = document.querySelector<HTMLElement>(
+                  `[data-block-id="${targetId}"] textarea, [data-block-id="${targetId}"] input`,
+                )
+                if (node) {
+                  try {
+                    node.focus()
+                  } catch {}
+                }
+              })
             }}
           >
             <Droppable droppableId="blocks">
@@ -978,13 +1539,6 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
                   {...provided.droppableProps}
                   ref={provided.innerRef}
                   className="space-y-2"
-                  onMouseDown={(e) => {
-                    const target = e.target as HTMLElement
-                    if (target.closest(".notion-block")) return
-                    if (isDraggingRef.current) return
-                    e.preventDefault()
-                    ensureTrailingBlankAndFocus()
-                  }}
                   aria-label="Document area"
                 >
                   {editorState.blocks.map((block, index) => (
@@ -995,9 +1549,11 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
                           {...provided.draggableProps}
                           style={provided.draggableProps.style}
                           className={`group relative notion-block ${snapshot.isDragging ? "opacity-50" : ""}`}
+                          data-block-id={block.id}
                           onMouseDown={(e) => {
                             // Don't prevent default here - let drag handle work
-                            if (!e.target.closest('[role="button"],input,textarea,.drag-handle')) {
+                            const targetEl = e.target as HTMLElement
+                            if (!targetEl.closest('[role="button"],input,textarea,.drag-handle')) {
                               e.stopPropagation()
                             }
                           }}
@@ -1018,7 +1574,9 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
                                 block={block}
                                 isSelected={editorState.selectedBlockId === block.id}
                                 isFocused={editorState.focusedBlockId === block.id}
-                                onUpdate={(updates) => updateBlock(block.id, updates)}
+                                onUpdate={(updates) => {
+                                  updateBlock(block.id, updates)
+                                }}
                                 onDelete={() => deleteBlock(block.id)}
                                 onDuplicate={() => duplicateBlock(block.id)}
                                 onSelect={() => setEditorState((prev) => ({ ...prev, selectedBlockId: block.id }))}
@@ -1051,8 +1609,8 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
 
           {/* Click-catcher area to continue writing on background click */}
           <div
-            className="mt-6 mb-16 min-h-[160px] cursor-text"
-            onMouseDown={(e) => {
+            className="mt-6 mb-[30px] min-h-[160px] cursor-text"
+            onDoubleClick={(e) => {
               if (isDraggingRef.current) return
               e.preventDefault()
               ensureTrailingBlankAndFocus()
@@ -1075,7 +1633,8 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
             if (commandTargetBlockId) {
               const target = editorState.blocks.find((b) => b.id === commandTargetBlockId)
               if (target && target.type === "paragraph" && (!target.content || target.content.trim() === "")) {
-                updateBlock(target.id, { type: type as any } as Partial<Block>)
+                const defaults = buildBlockDefaults(type)
+                updateBlock(target.id, { ...defaults, type } as Partial<Block>)
               } else {
                 addBlock(type, commandTargetBlockId)
               }
@@ -1087,6 +1646,8 @@ const NotionEditor = React.forwardRef<NotionEditorHandle, NotionEditorProps>(({ 
           }}
         />
       )}
+
+      {/* Collaboration presence temporarily disabled */}
     </>
   )
 })

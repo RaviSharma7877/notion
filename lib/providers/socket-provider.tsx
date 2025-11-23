@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { io as ClientIO, type Socket } from 'socket.io-client';
 import { useAuth } from '@/lib/providers/auth-provider';
+import { resolveWorkspaceOwnerId } from '@/lib/auth/user';
 
 type SocketContextType = {
   socket: Socket | null;
@@ -24,8 +25,10 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
   const { user } = useAuth();
   const socketUrl = (process.env.NEXT_PUBLIC_COLLAB_SOCKET_URL ?? 'http://localhost:9093').replace(/\/$/, '');
 
+  const userIdentifier = resolveWorkspaceOwnerId(user);
+
   useEffect(() => {
-    if (!user?.id) {
+    if (!userIdentifier) {
       setSocket(null);
       setIsConnected(false);
       return;
@@ -35,7 +38,7 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
       transports: ['websocket'],
       withCredentials: true,
       auth: {
-        userId: user.id,
+        userId: userIdentifier,
       },
     });
 
@@ -58,7 +61,7 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
       socketInstance.disconnect();
       handleDisconnect();
     };
-  }, [socketUrl, user?.id]);
+  }, [socketUrl, userIdentifier]);
 
   return (
     <SocketContext.Provider value={{ socket, isConnected }}>

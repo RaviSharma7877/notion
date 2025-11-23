@@ -6,7 +6,8 @@
     "build": "next build",
     "dev": "next dev",
     "lint": "eslint",
-    "start": "next start"
+    "start": "next start",
+    "ws-server": "node websocket-server.js"
   },
   "dependencies": {
     "@hello-pangea/dnd": "latest",
@@ -38,6 +39,7 @@
     "@radix-ui/react-toggle": "latest",
     "@radix-ui/react-toggle-group": "latest",
     "@radix-ui/react-tooltip": "latest",
+    "@stomp/stompjs": "^7.2.1",
     "@tiptap/extension-blockquote": "^3.9.0",
     "@tiptap/extension-bullet-list": "^3.9.0",
     "@tiptap/extension-code-block-lowlight": "^3.9.0",

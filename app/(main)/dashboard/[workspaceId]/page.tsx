@@ -1,13 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 
-import QuillEditor, { QuillEditorHandle } from '@/components/quill-editor/quill-editor';
 import Loader from '@/components/global/Loader';
 import { Button } from '@/components/ui/button';
 import { getWorkspace, type WorkspaceDto } from '@/lib/queries';
 import { useAppState } from '@/lib/providers/state-provider';
+import NotionEditor from '@/components/notion-editor/notion-editor';
 
 const WorkspacePage: React.FC = () => {
   const { state } = useAppState();
@@ -19,7 +19,6 @@ const WorkspacePage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const editorRef = useRef<QuillEditorHandle | null>(null);
   const fetchRef = useRef(false);
   const lastWorkspaceIdRef = useRef<string | null>(null);
 
@@ -90,18 +89,7 @@ const WorkspacePage: React.FC = () => {
     };
   }, [workspaceId, workspaceFromState]);
 
-  const flushEditor = useCallback(async () => {
-    await editorRef.current?.flushPending();
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      void flushEditor();
-    };
-  }, [flushEditor]);
-
   const handleBackToDashboard = async () => {
-    await flushEditor();
     router.replace('/dashboard');
   };
 
@@ -129,12 +117,7 @@ const WorkspacePage: React.FC = () => {
 
   return (
     <div className="relative h-full w-full">
-      <QuillEditor
-        ref={editorRef}
-        dirType="workspace"
-        fileId={workspace.id}
-        dirDetails={workspace}
-      />
+      <NotionEditor dirType="workspace" fileId={workspace.id} dirDetails={workspace} />
     </div>
   );
 };

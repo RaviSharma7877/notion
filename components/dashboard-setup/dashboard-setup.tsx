@@ -25,6 +25,7 @@ import { CreateWorkspaceFormSchema } from '@/lib/types';
 import { z } from 'zod';
 import EmojiPicker from '@/components/global/emoji-picker';
 import Loader from '@/components/global/Loader';
+import { resolveWorkspaceOwnerId } from '@/lib/auth/user';
 
 interface DashboardSetupProps {
   user: UserDto;
@@ -63,6 +64,11 @@ const DashboardSetup: React.FC<DashboardSetupProps> = ({
     }
 
     try {
+      const workspaceOwnerId = resolveWorkspaceOwnerId(user);
+      if (!workspaceOwnerId) {
+        throw new Error('Missing workspace owner identifier');
+      }
+
       const payload: WorkspaceCreateInput = {
         title: value.workspaceName,
         iconId: selectedEmoji,
@@ -70,7 +76,7 @@ const DashboardSetup: React.FC<DashboardSetupProps> = ({
         inTrash: false,
         bannerUrl: null,
         logo: null,
-        workspaceOwner: user.id,
+        workspaceOwner: workspaceOwnerId,
       };
 
       const createdWorkspace = await createWorkspace(payload);

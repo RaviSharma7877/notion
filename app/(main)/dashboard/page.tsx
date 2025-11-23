@@ -15,6 +15,7 @@ import {
 } from '@/lib/queries';
 import { useAuth } from '@/lib/providers/auth-provider';
 import EmojiPicker from '@/components/global/emoji-picker';
+import { resolveWorkspaceOwnerId } from '@/lib/auth/user';
 
 const DashboardPage = () => {
   const { user, initializing } = useAuth();
@@ -48,10 +49,11 @@ const DashboardPage = () => {
       return;
     }
 
-    if (lastUserIdRef.current !== user.id) {
+    const ownerId = resolveWorkspaceOwnerId(user) ?? null;
+    if (lastUserIdRef.current !== ownerId) {
       fetchWorkspaceRef.current = false;
       fetchSubscriptionRef.current = false;
-      lastUserIdRef.current = user.id;
+      lastUserIdRef.current = ownerId;
     }
 
     if (fetchWorkspaceRef.current) {
@@ -66,7 +68,11 @@ const DashboardPage = () => {
 
     const load = async () => {
       try {
-        const page = await listWorkspaces({ owner: user.id, size: 100 });
+        if (!ownerId) {
+          throw new Error('Missing workspace owner identifier');
+        }
+
+        const page = await listWorkspaces({ owner: ownerId, size: 100 });
         if (!active) return;
 
         setWorkspaces(page.content ?? []);
@@ -107,8 +113,9 @@ const DashboardPage = () => {
         const subscriptionPage = await listSubscriptions({ size: 100 });
         if (!active) return;
 
+        const subscriptionOwnerId = user.userId ?? resolveWorkspaceOwnerId(user) ?? user.id;
         const matchingSubscription =
-          subscriptionPage.content?.find((item) => item.userId === user.id) ?? null;
+          subscriptionPage.content?.find((item) => String(item.userId) === String(subscriptionOwnerId ?? '')) ?? null;
         setSubscription(matchingSubscription);
       } catch (error) {
         console.error('Failed to load subscription information', error);

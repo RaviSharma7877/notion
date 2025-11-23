@@ -1,32 +1,24 @@
 'use client';
-
 import {
+  loginRequest,
+  signupRequest,
+  type SubscriptionDto,
+  type UserDto,
+} from '@/lib/queries';
+import React, {
   createContext,
   useCallback,
   useContext,
   useEffect,
   useMemo,
   useState,
-  type ReactNode,
 } from 'react';
-
-import {
-  createUser,
-  findUserByEmail,
-  getUser,
-  listSubscriptions,
-  type UserCreateInput,
-  type UserDto,
-} from '@/lib/queries';
-import type { SubscriptionDto } from '@/lib/queries';
-import {
-  clearStoredUser,
-  getStoredUser,
-  setStoredUser,
-} from '@/lib/auth/storage';
+import type { ReactNode } from 'react';
 
 interface LoginPayload {
   email: string;
+  password: string;
+  rememberMe?: boolean;
 }
 
 interface SignupPayload {
@@ -41,8 +33,8 @@ interface AuthContextValue {
   initializing: boolean;
   login: (payload: LoginPayload) => Promise<UserDto>;
   signup: (payload: SignupPayload) => Promise<UserDto>;
-  logout: () => void;
-  refreshUser: (id: string) => Promise<UserDto | null>;
+  logout: () => Promise<void>;
+  refreshUser: () => Promise<UserDto | null>;
   refreshSubscription: () => Promise<SubscriptionDto | null>;
 }
 
@@ -54,18 +46,27 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(true);
 
-  const loadSubscription = useCallback(async (userId: string) => {
-    try {
-      const page = await listSubscriptions({ size: 100 });
-      const nextSubscription =
-        page.content?.find((item) => item.userId === userId) ?? null;
-      setSubscription(nextSubscription);
-      return nextSubscription;
-    } catch (error) {
-      console.error('Failed to fetch subscription', error);
-      setSubscription(null);
-      return null;
-    }
+  const loadSubscription = useCallback(async () => {
+    const fallbackSubscription: SubscriptionDto = {
+      id: 'subscription-demo',
+      userId: 'demo-user',
+      status: 'ACTIVE',
+      metadata: null,
+      priceId: null,
+      quantity: 1,
+      cancelAtPeriodEnd: false,
+      created: new Date().toISOString(),
+      currentPeriodStart: new Date().toISOString(),
+      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      endedAt: null,
+      cancelAt: null,
+      canceledAt: null,
+      trialStart: null,
+      trialEnd: null,
+    };
+
+    setSubscription(fallbackSubscription);
+    return fallbackSubscription;
   }, []);
 
   const clearSession = useCallback(() => {
@@ -75,143 +76,177 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const login = useCallback(
-    async ({ email }: LoginPayload) => {
+    async ({ email: loginEmail, password, rememberMe }: LoginPayload) => {
       setLoading(true);
       try {
-        const existing = await findUserByEmail(email);
-        if (!existing) {
-          throw new Error('User not found');
-        }
-        setUser(existing);
-        setStoredUser(existing);
-        await loadSubscription(existing.id);
-        return existing;
+        const result = await loginRequest({ email: loginEmail, password, rememberMe });
+        const responseUser = result.user ?? {};
+
+        const fallbackId = resolveStringId(responseUser.id) ?? resolveStringId(result.userId) ?? `user-${Date.now()}`;
+        const normalizedUser: UserDto = {
+          ...responseUser,
+          id: fallbackId,
+          userId: resolveStringId(responseUser.userId) ?? resolveStringId(result.userId) ?? fallbackId,
+          userSecretId: resolveStringId(responseUser.userSecretId) ?? fallbackId,
+          email: resolveEmail(responseUser.email, loginEmail) ?? loginEmail,
+        };
+
+        let session: StoredAuthSession = {
+          ...normalizedUser,
+          token: result.accessToken,
+          refreshToken: result.refreshToken ?? null,
+        };
+
+        setStoredUser(session);
+
+        setUser(normalizedUser);
+        await loadSubscription();
+        return normalizedUser;
+      } catch (error) {
+        clearSession();
+        throw error;
       } finally {
         setLoading(false);
       }
     },
-    [loadSubscription]
+    [clearSession, loadSubscription]
   );
 
   const signup = useCallback(
-    async ({ email, fullName }: SignupPayload) => {
+    async ({ email: signupEmail, fullName }: SignupPayload) => {
       setLoading(true);
       try {
-        const payload: UserCreateInput = {
-          email,
-          fullName,
-          avatarUrl: null,
-          billingAddress: null,
-          paymentMethod: null,
-          updatedAt: null,
+        const result = await signupRequest({ email: signupEmail, fullName });
+        const responseUser = result.user ?? {};
+
+        const fallbackId = resolveStringId(responseUser.id) ?? resolveStringId(result.userId) ?? `user-${Date.now()}`;
+        const normalizedUser: UserDto = {
+          ...responseUser,
+          id: fallbackId,
+          userId: resolveStringId(responseUser.userId) ?? resolveStringId(result.userId) ?? fallbackId,
+          userSecretId: resolveStringId(responseUser.userSecretId) ?? fallbackId,
+          email: resolveEmail(responseUser.email, signupEmail) ?? signupEmail,
         };
-        const created = await createUser(payload);
-        setUser(created);
-        setStoredUser(created);
-        await loadSubscription(created.id);
-        return created;
+
+        let session: StoredAuthSession = {
+          ...normalizedUser,
+          token: result.accessToken,
+          refreshToken: result.refreshToken ?? null,
+        };
+
+        setStoredUser(session);
+
+        setUser(normalizedUser);
+        await loadSubscription();
+        return normalizedUser;
+      } catch (error) {
+        clearSession();
+        throw error;
       } finally {
         setLoading(false);
       }
     },
-    [loadSubscription]
+    [clearSession, loadSubscription]
   );
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     clearSession();
   }, [clearSession]);
 
-  const refreshUser = useCallback(
-    async (id: string) => {
-      if (!id) {
-        return null;
-      }
-      try {
-        const fresh = await getUser(id);
-        setUser(fresh);
-        setStoredUser(fresh);
-        await loadSubscription(fresh.id);
-        return fresh;
-      } catch (error) {
-        console.error('Failed to refresh user', error);
-        clearSession();
-        return null;
-      }
-    },
-    [loadSubscription, clearSession]
-  );
+  const refreshUser = useCallback(async () => {
+    const stored = getStoredUser<StoredAuthSession>();
+    if (!stored?.token) {
+      clearSession();
+      return null;
+    }
+    setUser(stored);
+    await loadSubscription();
+    return stored;
+  }, [clearSession, loadSubscription]);
 
   const refreshSubscription = useCallback(async () => {
-    const userId = user?.id;
-    if (!userId) {
+    if (!user) {
       setSubscription(null);
       return null;
     }
-    return loadSubscription(userId);
-  }, [loadSubscription, user?.id]);
+    return loadSubscription();
+  }, [loadSubscription, user]);
 
   useEffect(() => {
-    const storedUser = getStoredUser<UserDto>();
-
-    if (!storedUser?.id) {
-      setInitializing(false);
+    const stored = getStoredUser<StoredAuthSession>();
+    if (stored?.token) {
+      setUser(stored);
+      loadSubscription().finally(() => {
+        setInitializing(false);
+      });
       return;
     }
+    setInitializing(false);
+  }, [loadSubscription]);
 
-    setUser(storedUser);
-
-    let active = true;
-
-    const bootstrap = async () => {
-      try {
-        await loadSubscription(storedUser.id);
-        await refreshUser(storedUser.id);
-      } finally {
-        if (active) {
-          setInitializing(false);
-        }
-      }
-    };
-
-    bootstrap();
-
-    return () => {
-      active = false;
-    };
-  }, [loadSubscription, refreshUser]);
-
-  const value = useMemo(
-    () => ({
-      user,
-      subscription,
-      loading,
-      initializing,
-      login,
-      signup,
-      logout,
-      refreshUser,
-      refreshSubscription,
-    }),
-    [
-      user,
-      subscription,
-      loading,
-      initializing,
-      login,
-      signup,
-      logout,
-      refreshUser,
-      refreshSubscription,
-    ]
-  );
+  const value = useMemo<AuthContextValue>(() => ({
+    user,
+    subscription,
+    loading,
+    initializing,
+    login,
+    logout,
+    signup,
+    refreshUser,
+    refreshSubscription,
+  }), [user, subscription, loading, initializing, login, logout, signup, refreshUser, refreshSubscription]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
 export const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) {
+  if (context === undefined) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;
+};
+
+interface StoredAuthSession extends UserDto {
+  token: string | null;
+  refreshToken: string | null;
+}
+const AUTH_STORAGE_KEY = 'notes.e2shub.auth-session';
+
+const getStoredUser = <T,>(): T | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+};
+
+const setStoredUser = (value: StoredAuthSession | null) => {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!value) {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(value));
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const clearStoredUser = () => {
+  setStoredUser(null);
+};
+
+const resolveStringId = (value: unknown): string | undefined => {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'number') return String(value);
+  return undefined;
+};
+
+const resolveEmail = (value: unknown, fallback: string | null = null): string | null => {
+  if (typeof value === 'string' && value.length > 0) return value;
+  return fallback;
 };
